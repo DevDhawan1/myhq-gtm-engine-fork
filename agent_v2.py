@@ -147,10 +147,16 @@ class GTMEngineV2:
         ) as progress:
             task = progress.add_task("[cyan]Detecting signals…", total=7)
 
-            # Step 1: Signal detection (v2 — India-first APIs)
+            # Step 1a: Signal detection (v2 — India-first APIs)
             self.all_signals = collect_all_signals(
                 cities=cities, dry_run=self.dry_run, verbose=self.args.verbose
             )
+
+            # Step 1b: PrivateCircle signals (MCA filings, SH-7 funding proxy)
+            from pipeline.signals_privatecircle import collect_all_privatecircle
+            pc_signals = collect_all_privatecircle(cities, dry_run=self.dry_run)
+            self.all_signals["privatecircle"] = pc_signals
+
             flat_signals = [s for sigs in self.all_signals.values() for s in sigs]
             progress.advance(task)
 
@@ -174,9 +180,18 @@ class GTMEngineV2:
             matched = match_personas(valid)
             progress.advance(task)
 
-            # Step 4: Intent scoring (v1 — 5-dimension 0-100 scoring)
+            # Step 3.5: Signal deduplication (prevents double-messaging)
+            from pipeline.signal_dedup import filter_duplicates
+            pre_dedup = len(matched)
+            matched, skipped = filter_duplicates(matched)
+            if skipped:
+                self.console.print(f"  Dedup: {skipped} already contacted, {len(matched)} new")
+
+            # Step 4: Intent scoring (v1 — 5-dimension + sector LTV)
             progress.update(task, description="[yellow]Scoring intent…")
             scored = score_leads(matched)
+            from pipeline.scorer import score_lead_with_sector
+            scored = [score_lead_with_sector(l) for l in scored]
             progress.advance(task)
 
             # Step 5: TRAI compliance (v1 — DND check, suppression, limits)

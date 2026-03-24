@@ -185,6 +185,51 @@ class IntentScorer:
         return self.TIER_LABELS.get(tier, tier)
 
 
+# ── Sector LTV multiplier (myHQ historical data) ────────────────────
+# Based on avg months retained x avg seats x avg INR/seat
+
+SECTOR_LTV_MULTIPLIER: dict[str, float] = {
+    "saas": 1.8, "software": 1.8, "it": 1.6,
+    "fintech": 1.7, "financial services": 1.7,
+    "healthtech": 1.9, "health": 1.9, "pharma": 1.6,
+    "edtech": 1.8, "education": 1.7,
+    "cleantech": 1.6, "renewable": 1.6, "sustainability": 1.5,
+    "logistics": 1.4, "supply chain": 1.4,
+    "ecommerce": 1.3, "retail": 1.2,
+    "consulting": 1.5, "professional services": 1.4,
+    "media": 1.2, "entertainment": 1.1, "gaming": 1.1,
+    "real estate": 1.2, "proptech": 1.2,
+    "hrtech": 1.3, "recruitment": 1.2,
+    "crypto": 0.7, "web3": 0.7, "blockchain": 0.7,
+    "social media": 0.8,
+}
+
+
+def get_sector_score(sector: str) -> int:
+    """Return 0-20 sector fit score based on historical LTV."""
+    if not sector:
+        return 10
+    sector_lower = sector.lower()
+    for key, multiplier in SECTOR_LTV_MULTIPLIER.items():
+        if key in sector_lower:
+            return max(0, min(20, int((multiplier - 0.7) / (1.9 - 0.7) * 20)))
+    return 10
+
+
+def score_lead_with_sector(lead: dict) -> dict:
+    """Add sector LTV score as 6th dimension. Modifies lead in place."""
+    sector = lead.get("sector") or lead.get("company_sector", "")
+    sector_score = get_sector_score(sector)
+    current = lead.get("intent_score", 0)
+
+    lead["sector_score"] = sector_score
+    lead["intent_score_raw"] = current
+    # Sector adds up to 15% weighting on top of base score
+    lead["intent_score"] = min(100, int(current * 0.85 + sector_score * 0.15 * 5))
+
+    return lead
+
+
 # ── Module entry point ──────────────────────────────────────────────
 
 
