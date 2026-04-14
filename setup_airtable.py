@@ -4,11 +4,11 @@
 Run once: python setup_airtable.py
 
 Tables created:
+  PKM_Cache        — defense profiles (shared brain)
   WhatsApp_Queue   — pending and sent WA messages
   WA_Replies       — incoming replies + classifications
   Competitor_Intel — weekly competitor scan results
   LLM_Content      — generated content pieces
-  (PKM_Cache already exists from AROS/ARIA)
 """
 
 from __future__ import annotations
@@ -19,6 +19,12 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_DT_OPTIONS = {
+    "dateFormat": {"name": "iso"},
+    "timeFormat": {"name": "24hour"},
+    "timeZone": "Asia/Kolkata",
+}
 
 
 def create_tables() -> None:
@@ -36,6 +42,23 @@ def create_tables() -> None:
 
     tables = [
         {
+            "name": "PKM_Cache",
+            "fields": [
+                {"name": "cache_key", "type": "singleLineText"},
+                {"name": "profile_text", "type": "singleLineText"},
+                {"name": "detected_mode", "type": "singleLineText"},
+                {"name": "confidence", "type": "number", "options": {"precision": 0}},
+                {"name": "reasoning", "type": "multilineText"},
+                {"name": "awareness_score", "type": "number", "options": {"precision": 0}},
+                {"name": "bypass_strategy", "type": "multilineText"},
+                {"name": "forbidden_phrases", "type": "multilineText"},
+                {"name": "message_cap_words", "type": "number", "options": {"precision": 0}},
+                {"name": "source", "type": "singleLineText"},
+                {"name": "company_name", "type": "singleLineText"},
+                {"name": "analyzed_at", "type": "dateTime", "options": _DT_OPTIONS},
+            ],
+        },
+        {
             "name": "WhatsApp_Queue",
             "fields": [
                 {"name": "company_name", "type": "singleLineText"},
@@ -51,7 +74,7 @@ def create_tables() -> None:
                     ]
                 }},
                 {"name": "message_id", "type": "singleLineText"},
-                {"name": "sent_at", "type": "dateTime"},
+                {"name": "sent_at", "type": "dateTime", "options": _DT_OPTIONS},
                 {"name": "signal_type", "type": "singleLineText"},
                 {"name": "signal_detail", "type": "singleLineText"},
             ],
@@ -73,7 +96,7 @@ def create_tables() -> None:
                 {"name": "urgency", "type": "singleLineText"},
                 {"name": "key_info", "type": "multilineText"},
                 {"name": "alert_sent", "type": "checkbox"},
-                {"name": "received_at", "type": "dateTime"},
+                {"name": "received_at", "type": "dateTime", "options": _DT_OPTIONS},
             ],
         },
         {
@@ -82,7 +105,7 @@ def create_tables() -> None:
                 {"name": "competitor", "type": "singleLineText"},
                 {"name": "intel_type", "type": "singleLineText"},
                 {"name": "data_json", "type": "multilineText"},
-                {"name": "scraped_at", "type": "dateTime"},
+                {"name": "scraped_at", "type": "dateTime", "options": _DT_OPTIONS},
             ],
         },
         {
@@ -94,7 +117,7 @@ def create_tables() -> None:
                 {"name": "target_queries", "type": "multilineText"},
                 {"name": "word_count", "type": "number", "options": {"precision": 0}},
                 {"name": "perplexity_submitted", "type": "checkbox"},
-                {"name": "generated_at", "type": "dateTime"},
+                {"name": "generated_at", "type": "dateTime", "options": _DT_OPTIONS},
                 {"name": "status", "type": "singleLineText"},
             ],
         },
@@ -109,11 +132,13 @@ def create_tables() -> None:
                 timeout=10,
             )
             if resp.status_code == 200:
-                print(f"Created: {table['name']}")
+                print(f"✓ Created: {table['name']}")
+            elif resp.status_code == 422:
+                print(f"  {table['name']}: already exists, skipping")
             else:
-                print(f"{table['name']}: {resp.status_code} (may already exist)")
+                print(f"  {table['name']}: {resp.status_code} — {resp.text[:120]}")
         except Exception as e:
-            print(f"Error creating {table['name']}: {e}")
+            print(f"  Error creating {table['name']}: {e}")
 
 
 if __name__ == "__main__":

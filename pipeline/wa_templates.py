@@ -1,7 +1,7 @@
 """WhatsApp Business API Template Registry for myHQ.
 
 CRITICAL: All templates must be pre-approved by Meta before sending.
-Submit via Gupshup dashboard on Day 1. Approval: 24-72 hours.
+Submit via WATI dashboard on Day 1. Approval: 24-72 hours.
 
 Template categories:
   UTILITY     — transactional (higher approval rate)
@@ -28,7 +28,7 @@ TEMPLATES: dict[str, dict] = {
         "bypass": "PURE_DATA — open with number, no 'I', no pitch language",
         "max_words": 80,
         "banned": ["I'm excited", "love to connect", "great opportunity", "just wanted to"],
-        "gupshup_template_id": None,
+        "wati_template_id": None,
         "meta_approval_status": "pending",
     },
     "OVERLOAD_AVOIDANCE": {
@@ -44,7 +44,7 @@ TEMPLATES: dict[str, dict] = {
         "bypass": "ULTRA_SHORT — under 60 words, one ask, one slot",
         "max_words": 60,
         "banned": ["hope this finds you", "quick call", "at your convenience", "just following up"],
-        "gupshup_template_id": None,
+        "wati_template_id": None,
         "meta_approval_status": "pending",
     },
     "IDENTITY_THREAT": {
@@ -61,7 +61,7 @@ TEMPLATES: dict[str, dict] = {
         "bypass": "AMPLIFICATION — they built this, we support it",
         "max_words": 70,
         "banned": ["let us help you", "you need", "solve your problem", "struggling with"],
-        "gupshup_template_id": None,
+        "wati_template_id": None,
         "meta_approval_status": "pending",
     },
     "SOCIAL_PROOF_SKEPTICISM": {
@@ -78,7 +78,7 @@ TEMPLATES: dict[str, dict] = {
         "bypass": "CREDIBILITY_FIRST — exact numbers, verifiable, no vague claims",
         "max_words": 90,
         "banned": ["trusted by", "leading platform", "best in class", "industry-leading"],
-        "gupshup_template_id": None,
+        "wati_template_id": None,
         "meta_approval_status": "pending",
     },
     "TIMING_SKEPTICISM": {
@@ -95,7 +95,7 @@ TEMPLATES: dict[str, dict] = {
         "bypass": "TRIGGER_EVENT — why now is different, specific deadline",
         "max_words": 75,
         "banned": ["whenever you're ready", "no rush", "at your pace", "just checking in"],
-        "gupshup_template_id": None,
+        "wati_template_id": None,
         "meta_approval_status": "pending",
     },
 }
@@ -106,15 +106,15 @@ def get_template_for_defense(defense_mode: str) -> dict:
     return TEMPLATES.get(defense_mode, TEMPLATES["OVERLOAD_AVOIDANCE"])
 
 
-def generate_gupshup_submission_guide() -> str:
+def generate_wati_submission_guide() -> str:
     """Print the Day 1 template submission guide."""
     lines = [
         "=" * 60,
         "WHATSAPP TEMPLATE SUBMISSION GUIDE — DO THIS ON DAY 1",
         "=" * 60,
         "",
-        "Step 1: Log in to Gupshup dashboard (app.gupshup.io)",
-        "Step 2: Go to Templates > Create New Template",
+        "Step 1: Log in to WATI dashboard (app.wati.io)",
+        "Step 2: Go to Templates > New Template",
         "Step 3: Submit each template below. 24-72h for approval.",
         "",
         "IMPORTANT: Do not change template text after submission.",
@@ -137,8 +137,8 @@ def generate_gupshup_submission_guide() -> str:
 
     lines.extend([
         "After approval:",
-        "  1. Copy each Template ID from Gupshup",
-        "  2. Paste into wa_templates.py > gupshup_template_id",
+        "  1. Copy each Template ID from WATI",
+        "  2. Paste into wa_templates.py > wati_template_id",
         "  3. Change meta_approval_status to 'approved'",
         "  4. The agent is now ready to send.",
         "",
@@ -149,4 +149,4 @@ def generate_gupshup_submission_guide() -> str:
 
 
 if __name__ == "__main__":
-    print(generate_gupshup_submission_guide())
+    print(generate_wati_submission_guide())

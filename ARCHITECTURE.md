@@ -76,7 +76,7 @@
                     ┌───────────────────▼───────────────────┐
                     │     OUTREACH GENERATION (PKM-gated)   │
                     │                                       │
-                    │  WhatsApp (Gupshup BSP)  ← primary    │
+                    │  WhatsApp (WATI BSP)     ← primary    │
                     │  Email (Instantly)        ← secondary  │
                     │  LinkedIn                 ← tertiary   │
                     │  SDR call script          ← if needed  │
@@ -146,13 +146,13 @@ Hunter (email-only fallback)
 
 Then verify: Millionverifier (email) → MSG91 (WhatsApp check) → TRAI DND (regulatory).
 
-### WhatsApp: Gupshup over Meta Direct
+### WhatsApp: WATI over Meta Direct
 
-- India-native BSP (Bengaluru HQ, since 2004)
-- TRAI DND handling built in
-- Hindi template support for Tier 2 expansion
-- 10,000+ messages/day on basic plan
-- ₹0.40-0.50 per conversation
+- Meta certified BSP, clean REST API
+- TRAI DND handled in pipeline code (compliance/india.py)
+- Hindi template support
+- Up to 100K messages/day on higher plans
+- ~$49-99/mo + Meta per-conversation fees
 - Webhook for reply detection → Claude Haiku classification → HOT alerts
 
 ## PKM Enforcement Points

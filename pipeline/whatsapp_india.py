@@ -1,10 +1,10 @@
 """myHQ GTM Engine v2 — WhatsApp automation for India B2B.
 
-BSP: Gupshup (India-native, Meta certified, TRAI DND native)
-Why not MSG91: Gupshup has higher volume limits, better Hindi support,
-and has been in India since 2004. Enterprise-grade.
+BSP: WATI (Meta certified, simple REST API, good dashboard)
+Auth: Bearer token from WATI dashboard → API → Access Token
+Base URL: WATI_BASE_URL env var (e.g. https://live-mt-server.wati.io/<account_id>)
 
-Cost: ~0.40-0.50 INR per conversation + platform fee.
+Cost: ~$49/mo (1K conversations) or $99/mo (3K) + Meta per-conversation fees.
 
 Sequence per lead (3-touch rule, TRAI compliant):
   Day 0:  WhatsApp template (PKM-calibrated)
@@ -14,7 +14,7 @@ Sequence per lead (3-touch rule, TRAI compliant):
   STOP.   7-day cooling period minimum.
 
 All messages reference the specific signal that triggered outreach.
-All templates pre-approved by Meta via Gupshup dashboard.
+All templates pre-approved by Meta via WATI dashboard.
 """
 
 from __future__ import annotations
@@ -40,15 +40,13 @@ logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-GUPSHUP_API_URL = "https://api.gupshup.io/wa/api/v1/msg"
-GUPSHUP_APP_NAME = os.getenv("GUPSHUP_APP_NAME", "")
-GUPSHUP_API_KEY = os.getenv("GUPSHUP_API_KEY", "")
-GUPSHUP_SOURCE = os.getenv("GUPSHUP_SOURCE_NUMBER", "")
+WATI_API_TOKEN = os.getenv("WATI_API_TOKEN", "")
+WATI_BASE_URL = os.getenv("WATI_BASE_URL", "").rstrip("/")
 
 ALERT_EMAIL = os.getenv("ALERT_EMAIL", SMTP_USER)
 
 # ── Template registry — each calibrated to a PKM defense mode ────────
-# Templates must be pre-approved by Meta via Gupshup dashboard.
+# Templates must be pre-approved by Meta via WATI dashboard.
 # Approval takes 24-72 hours per template. Submit all 5 on day one.
 
 WHATSAPP_TEMPLATES: dict[str, dict] = {
@@ -116,7 +114,7 @@ WHATSAPP_TEMPLATES: dict[str, dict] = {
 
 
 class WhatsAppSender:
-    """Send PKM-calibrated WhatsApp messages via Gupshup BSP."""
+    """Send PKM-calibrated WhatsApp messages via WATI BSP."""
 
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
@@ -145,7 +143,7 @@ class WhatsAppSender:
         if not clean_phone:
             return {"success": False, "error": "invalid_phone", "company": company}
 
-        if self.dry_run or not GUPSHUP_API_KEY:
+        if self.dry_run or not WATI_API_TOKEN:
             return self._mock_send(clean_phone, company, defense, message_text)
 
         # TRAI DND check
@@ -154,24 +152,24 @@ class WhatsAppSender:
             return {"success": False, "error": "dnd_registered", "company": company}
 
         try:
+            template_name = WHATSAPP_TEMPLATES.get(defense, {}).get("template_name", "myhq_ultra_short_v1")
+            number = clean_phone.replace("+", "")
             resp = requests.post(
-                GUPSHUP_API_URL,
+                f"{WATI_BASE_URL}/api/v1/sendTemplateMessage?whatsappNumber={number}",
                 headers={
-                    "apikey": GUPSHUP_API_KEY,
-                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": f"Bearer {WATI_API_TOKEN}",
+                    "Content-Type": "application/json",
                 },
-                data={
-                    "channel": "whatsapp",
-                    "source": GUPSHUP_SOURCE,
-                    "destination": clean_phone,
-                    "src.name": GUPSHUP_APP_NAME,
-                    "message": json.dumps({"type": "text", "text": message_text}),
+                json={
+                    "template_name": template_name,
+                    "broadcast_name": "myhq_gtm",
+                    "parameters": [{"name": "1", "value": message_text}],
                 },
                 timeout=10,
             )
 
             result = resp.json()
-            success = result.get("status") == "submitted"
+            success = result.get("result") is True
 
             send_result = {
                 "success": success,

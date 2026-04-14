@@ -91,7 +91,7 @@ Apollo ($99/mo) → People Data Labs ($0.01/call) → Netrows ($0.03/profile) �
 Millionverifier · MSG91 WhatsApp check · TRAI DND registry
 
 **WhatsApp automation:**
-Gupshup BSP (India-native, Meta certified, TRAI DND native, ~₹15-20K/mo)
+WATI BSP (Meta certified, clean REST API, ~$49-99/mo + Meta fees)
 
 **Competitor intelligence:**
 Apify website crawler · SerpAPI Google Reviews · Claude Haiku classification
@@ -139,7 +139,7 @@ myhq-gtm-engine/
 │   ├── signals_india_v2.py         # 5-tier India-first signal detection
 │   ├── enrichment_india_v2.py      # Waterfall enrichment (5 sources + 3 verifiers)
 │   ├── pkm_myhq.py                 # PKM defense profiling + outreach generation
-│   ├── whatsapp_india.py           # Gupshup BSP + reply classifier + HOT alerts
+│   ├── whatsapp_india.py           # WATI BSP + reply classifier + HOT alerts
 │   ├── competitor_intel.py         # Weekly competitor scraping (5 competitors)
 │   ├── llm_content_indexer.py      # Content generation + Perplexity indexing
 │   ├── scorer.py                   # 5-dimension intent scoring (0-100)
@@ -160,7 +160,7 @@ myhq-gtm-engine/
 
 ### v2 (CURRENT) — India-First Signal Intelligence + PKM
 
-What we have now. Replaces scrapers-on-scrapers with structured Indian data APIs. PKM mandatory gate on every message. Gupshup WhatsApp. Competitor intel. LLM content indexing. Manual SDR still closes the deal.
+What we have now. Replaces scrapers-on-scrapers with structured Indian data APIs. PKM mandatory gate on every message. WATI WhatsApp. Competitor intel. LLM content indexing. Manual SDR still closes the deal.
 
 **The human SDR reads the card, picks up the phone, closes the call.**
 

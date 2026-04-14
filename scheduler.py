@@ -67,7 +67,7 @@ def run_job(job_name: str) -> None:
         logger.info("WhatsApp sends — reads queue from Airtable")
 
     elif job_name == "replies":
-        logger.info("Reply classification — Gupshup webhook processes incoming")
+        logger.info("Reply classification — WATI webhook processes incoming")
 
     elif job_name == "competitors":
         from pipeline.competitor_intel import run_weekly_competitor_scan
