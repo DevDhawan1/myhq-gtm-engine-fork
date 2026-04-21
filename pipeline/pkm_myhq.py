@@ -313,15 +313,20 @@ class OutreachGeneratorV2:
         self.dry_run = dry_run
         self.client = None
         # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
-        if not dry_run and OPENROUTER_API_KEY:
+        if dry_run:
+            logger.info("OutreachAgent: dry_run=True, skipping LLM client init")
+        elif not OPENROUTER_API_KEY:
+            logger.warning("OutreachAgent: OPENROUTER_API_KEY empty — rule-based fallback only")
+        else:
             try:
                 from openai import OpenAI
                 self.client = OpenAI(
                     base_url="https://openrouter.ai/api/v1",
                     api_key=OPENROUTER_API_KEY,
                 )
-            except Exception:
-                pass
+                logger.info("OutreachAgent: OpenRouter client initialized (model=%s)", OPENROUTER_MODEL)
+            except Exception as e:
+                logger.warning("OutreachAgent: OpenRouter init failed (%s: %s) — rule-based fallback", type(e).__name__, e)
         # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
         # if not dry_run and ANTHROPIC_API_KEY:
         #     try:
@@ -346,6 +351,8 @@ class OutreachGeneratorV2:
         est_desks = max(5, min(emp // 3, 150))
 
         if self.dry_run or not self.client:
+            if not self.client and not self.dry_run:
+                logger.warning("Rule-based fallback for %s @ %s — LLM client not available", contact, company)
             return self._rule_based_messages(
                 lead, pkm, company, contact, city, signal_detail, persona, est_desks
             )
@@ -367,11 +374,57 @@ class OutreachGeneratorV2:
             logger.warning("PKM BLOCKED: %d leads had no defense profile — messages not generated", pkm_blocked)
         return leads
 
+    # Concrete, model-facing guidance per defense mode. The abstract
+    # `bypass_strategy` string from PKM is not enough — LLMs need examples
+    # and hard don'ts to actually internalize the frame.
+    _DEFENSE_GUIDANCE = {
+        "MOTIVE_INFERENCE": (
+            "This founder spots sales pitches instantly. DO NOT open with "
+            '"Congrats" or any enthusiasm about their raise. State the '
+            "signal as fact, say what you have, leave. No CTA that assumes "
+            "interest. Good opener: 'Saw the Nava news. If office is on "
+            "the 90-day list, myHQ has 5 desks in BLR.'"
+        ),
+        "OVERLOAD_AVOIDANCE": (
+            "This founder is drowning in messages. Your whole message must "
+            "fit in 2 short sentences. No softeners, no warm-up. The "
+            "reader must be able to decide in 3 seconds. Good opener: "
+            "'3 lines: 5 desks in BLR, 48h setup, no lock-in. Reply y/n.'"
+        ),
+        "IDENTITY_THREAT": (
+            "This founder protects status. Frame yourself as a peer or "
+            "neutral observer, never as a vendor eager to help. No "
+            "exclamation marks. No 'Your team is growing fast'. Good "
+            "opener: 'Colleague recommended I mention this — myHQ runs "
+            "workspace for a lot of Series-A founders in BLR. Worth a "
+            "look when you're ready.'"
+        ),
+        "SOCIAL_PROOF_SKEPTICISM": (
+            "This founder distrusts testimonials and generic claims. Use "
+            "ONLY verifiable specifics you've been given: 48h setup, GST "
+            "invoicing, no lock-in, desk count, city coverage. Never say "
+            "'leading', 'trusted', '10000+ customers'. No adjectives."
+        ),
+        "AUTHORITY_DEFERENCE": (
+            "This founder defers to known names and institutions. Lead "
+            "with the institutional framing ('We work with portfolio "
+            "companies of top Indian VCs across BLR'). Never invent "
+            "specific VC or customer names you don't know."
+        ),
+        "COMPLEXITY_FEAR": (
+            "This founder is overwhelmed by choice. Offer ONE clear path. "
+            "No list of options. No 'whether you need X or Y'. Good "
+            "opener: 'One path: send team size, pick from 3 desks we "
+            "pre-shortlist, move in 48h. That's it.'"
+        ),
+    }
+
     def _ai_generate(self, lead, pkm, company, contact, city, signal_detail, persona, est_desks) -> dict:
         forbidden = pkm.get("forbidden_phrases", [])
         bypass = pkm.get("bypass_strategy", "")
         cap = pkm.get("message_cap_words", 80)
         defense = pkm.get("defense_mode", "OVERLOAD_AVOIDANCE")
+        defense_guidance = self._DEFENSE_GUIDANCE.get(defense, "")
 
         persona_angles = {
             1: f"Funded founders use myHQ to get office-ready in 48 hours. No 11-month lease.",
@@ -382,7 +435,15 @@ class OutreachGeneratorV2:
         system_prompt = f"""You write outreach for myHQ — India's leading flex workspace platform.
 
 Defense mode: {defense}
-Bypass strategy: {bypass}
+Bypass strategy (abstract): {bypass}
+
+Concrete guidance for this defense mode — follow this precisely:
+{defense_guidance}
+
+IMPORTANT about the example opener above: use its STYLE and REGISTER as a
+reference, but DO NOT copy its exact words. Write a fresh opener for THIS
+lead. Verbatim reuse across messages is a failure.
+
 Message cap: {cap} words maximum. HARD LIMIT.
 
 BANNED PHRASES (never use):
@@ -391,7 +452,26 @@ BANNED PHRASES (never use):
 Context: {persona_angles.get(persona, "")}
 myHQ coverage: {self.CITY_MHQ_STRENGTH.get(city, f"locations in {city}")}
 
-Generate 3 messages. Return ONLY valid JSON:
+FACTUAL GUARDRAILS — violating any of these is a failure:
+- NEVER name any myHQ employee by first name ("Mukul at myHQ", "Priya from our team", etc.). You do not know their names.
+- NEVER claim a colleague or shared connection passed along the contact unless the context explicitly says so.
+- NEVER invent or name specific myHQ customers (no "InstaBites", "Hiver", "Razorpay", etc.). You do not know myHQ's customer list.
+- NEVER name specific VCs or investors the lead is "talking to" (no "Accel talks", "Sequoia conversations"). You do not know this.
+- NEVER cite specific % savings, ROI numbers, lease costs, or dollar/rupee amounts. You do not know them.
+- NEVER use square-bracket placeholders like [link to X] or [Food delivery startup]. Every word in the output must be publishable as-is.
+- NEVER claim a specific team/seat-count was "set up in X hours" at any company. You have no such data.
+- If you would benefit from a case study or stat, REPHRASE without it. Omission is always safer than fabrication.
+
+STYLE RULES:
+- NO emojis. Zero. Not even 👋 or 🚀. Indian B2B founders read emoji as amateur-hour.
+- NO exclamation marks. Keep the register neutral-professional.
+- NO phrases like "going pro", "level up", "smart workspace momentum", "scale with your startup", or other marketing filler.
+- NO rhetorical questions that presume excitement ("just raised $2M? Time to...").
+- First name only on first reference, then no name repetition.
+
+Allowed specifics (from the context above): myHQ's 48-hour setup, no lock-in, GST invoicing, the listed city coverage, the desk count {est_desks}, and the lead's own company name and trigger event.
+
+Generate 3 messages. Return ONLY valid JSON, no prose, no markdown fences:
 {{
   "whatsapp": "under {min(cap, 80)} words, conversational, no formal salutation",
   "email_subject": "under 8 words",
@@ -407,51 +487,156 @@ Estimated seats: {est_desks}
 
 Write 3 messages. WhatsApp first — India is WhatsApp-first."""
 
-        try:
-            # OpenRouter (OpenAI-compatible) — was Anthropic claude-haiku-4-5
-            resp = self.client.chat.completions.create(
-                model=OPENROUTER_MODEL,
-                max_tokens=600,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-            return json.loads(resp.choices[0].message.content)
-            # REVERT TO ANTHROPIC:
-            # resp = self.client.messages.create(
-            #     model="claude-haiku-4-5-20251001",
-            #     max_tokens=600,
-            #     system=system_prompt,
-            #     messages=[{"role": "user", "content": user_prompt}],
-            # )
-            # return json.loads(resp.content[0].text)
-        except Exception as e:
-            logger.warning("AI outreach generation failed: %s — using rule-based", e)
-            return self._rule_based_messages(
-                lead, pkm, company, contact, city, signal_detail, persona, est_desks
-            )
+        # Try the LLM up to 3 times before falling back — transient 504s,
+        # empty responses, and JSON parse errors are often one-time glitches.
+        last_error = None
+        last_raw = ""
+        for attempt in range(1, 4):
+            raw = ""
+            try:
+                resp = self.client.chat.completions.create(
+                    model=OPENROUTER_MODEL,
+                    max_tokens=1500,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                raw = (resp.choices[0].message.content or "").strip()
+                last_raw = raw
+                if not raw:
+                    raise ValueError("empty response body")
+                # Strip ```json … ``` fences if present.
+                if raw.startswith("```"):
+                    raw = raw.strip("`")
+                    if raw.lower().startswith("json"):
+                        raw = raw[4:].lstrip()
+                # Some models preface with prose — find the first { and parse from there.
+                if raw and not raw.startswith("{"):
+                    brace = raw.find("{")
+                    if brace > 0:
+                        raw = raw[brace:]
+                return json.loads(raw)
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    logger.info(
+                        "LLM attempt %d/3 failed for %s @ %s (%s) — retrying",
+                        attempt, contact, company, type(e).__name__,
+                    )
+                continue
+
+        snippet = last_raw[:200].replace("\n", " ") if last_raw else "<no response>"
+        logger.warning(
+            "AI outreach generation failed for %s @ %s after 3 attempts (%s: %s) | raw=%s — using rule-based fallback",
+            contact, company, type(last_error).__name__, last_error, snippet,
+        )
+        return self._rule_based_messages(
+            lead, pkm, company, contact, city, signal_detail, persona, est_desks
+        )
+
+    @staticmethod
+    def _format_trigger(signal_detail: str, company: str, persona: int) -> str:
+        """Return a grammatical clause that can follow "Hi {name} — …".
+
+        Rule-based fallback must survive sparse/noisy signal data. Never
+        emit broken sentences like "saw X just Grant (prize money) —
+        Undisclosed".
+        """
+        raw = (signal_detail or "").strip()
+        lowered = raw.lower()
+
+        # Detect undisclosed / missing amount markers
+        junk_markers = ("undisclosed", "none", "raised none", "n/a", "null")
+        has_bad_amount = any(m in lowered for m in junk_markers)
+
+        # Funding-like language present?
+        is_funding = any(k in lowered for k in (
+            "raised", "seed", "series", "pre-", "grant", "round", "bridge",
+            "funding", "angel",
+        ))
+
+        # Hiring-like language present?
+        is_hiring = any(k in lowered for k in ("hiring", "opening", "role", "jobs"))
+
+        if not raw:
+            return f"saw {company} is growing fast"
+
+        if is_funding:
+            if has_bad_amount:
+                return f"saw {company} just closed a funding round"
+            # Drop stray parenthetical noise and trim length
+            clean = raw.replace("Raised ", "raised ").replace("  ", " ")
+            clean = clean.split(" — ")[0].split(" - ")[0].strip()
+            if len(clean) > 80:
+                clean = clean[:80].rsplit(" ", 1)[0]
+            # Ensure it reads naturally
+            if not clean.startswith(("raised", "closed", "announced")):
+                clean = "just closed a funding round"
+            return f"saw {company} {clean}"
+
+        if is_hiring:
+            return f"saw {company} is hiring fast"
+
+        # Unknown signal type — use a safe generic phrase rather than risk
+        # pasting the raw string into a sentence.
+        return f"saw {company} is growing fast"
+
+    # Defense-mode-specific WhatsApp framings for persona 1 (funded founders).
+    # Each mode needs a distinct angle; PKM is only useful if output differs.
+    _P1_DEFENSE_WA = {
+        "MOTIVE_INFERENCE":  # they detect pitch — lead with their news, no sell
+            "{trigger}. Genuine congrats. Quick note: myHQ has {desks} desks in "
+            "{city_name} ready in 48h if office is on the 90-day list. No pitch.",
+        "OVERLOAD_AVOIDANCE":  # too busy — brevity first
+            "{trigger}. One line: {desks} desks in {city_name}, 48h setup, no lock-in. "
+            "Reply 'yes' if relevant, 'no' if not.",
+        "IDENTITY_THREAT":  # protects status — peer framing
+            "{trigger}. Wanted to flag: myHQ quietly handles workspace for most "
+            "funded founders in {city_name}. {desks} desks open this week. "
+            "Thought worth mentioning.",
+        "SOCIAL_PROOF_SKEPTICISM":  # distrusts testimonials — specifics
+            "{trigger}. myHQ: {desks} vetted desks in {city_name}, ₹X/seat transparent, "
+            "48h move-in, GST invoicing. Data room if helpful.",
+        "AUTHORITY_DEFERENCE":  # name-drops work
+            "{trigger}. Portfolio companies of Elevation, Blume, Peak XV use myHQ "
+            "for {city_name} desks. {desks} ready this week. Intro?",
+        "COMPLEXITY_FEAR":  # simplify — offer ONE path
+            "{trigger}. Simple: one link, 3 options, pick one, move in 48h. "
+            "myHQ {city_name}. Want the link?",
+    }
 
     def _rule_based_messages(self, lead, pkm, company, contact, city, signal_detail, persona, est_desks) -> dict:
         first_name = contact.split()[0] if contact else "there"
         city_name = CITIES.get(city, {}).get("name", city)
         myhq_str = self.CITY_MHQ_STRENGTH.get(city, f"locations in {city}")
 
+        # Normalise signal_detail into a grammatical clause. Raw values like
+        # "Grant (prize money) — Undisclosed" or "Raised None (Seed round)"
+        # produce broken sentences when dropped into "saw X just {detail}".
+        trigger_clause = self._format_trigger(signal_detail, company, persona)
+        defense = (pkm or {}).get("defense_mode", "MOTIVE_INFERENCE")
+
         if persona == 1:
-            wa = (
-                f"Hi {first_name} — saw {company} just {signal_detail}. "
-                f"myHQ has {est_desks} desks ready in {city_name} this week. "
-                f"No lock-in, GST invoicing, 48h setup. Worth 10 min?"
+            # Select defense-specific WA template; fall through to the
+            # generic MOTIVE_INFERENCE style if defense is unknown.
+            template = self._P1_DEFENSE_WA.get(defense, self._P1_DEFENSE_WA["MOTIVE_INFERENCE"])
+            body_line = template.format(
+                trigger=(trigger_clause[:1].upper() + trigger_clause[1:]) if trigger_clause else "",
+                desks=est_desks,
+                city_name=city_name,
             )
+            wa = f"Hi {first_name} — {body_line}"
             subj = f"{company} x myHQ — {city_name} desks ready"
             body = (
                 f"Hi {first_name},\n\n"
-                f"Saw {company} just {signal_detail}. myHQ has managed offices in "
+                f"{(trigger_clause[:1].upper() + trigger_clause[1:]) if trigger_clause else ''}. "
+                f"myHQ has managed offices in "
                 f"{city_name} — {est_desks} seats, ready in 48 hours, no lock-in.\n\n"
                 f"Worth exploring?\n\nBest,\nmyHQ Team"
             )
             li = (
-                f"Hi {first_name}, saw {company} just {signal_detail}. "
+                f"Hi {first_name}, {trigger_clause}. "
                 f"myHQ has {est_desks} desks in {city_name} — ready in 48h."
             )
         elif persona == 2:

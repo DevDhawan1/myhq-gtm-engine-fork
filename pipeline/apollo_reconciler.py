@@ -20,6 +20,9 @@ import os
 from pathlib import Path
 
 import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("apollo-reconciler")
 

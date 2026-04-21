@@ -138,6 +138,8 @@ class GTMEngineV2:
     def _run_full_pipeline(self) -> None:
         cities = self._get_cities()
 
+        self._auto_reconcile_apollo()
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -167,6 +169,13 @@ class GTMEngineV2:
             progress.update(task, description="[yellow]Enriching contacts…")
             enriched = enrich_signals(flat_signals[:50], dry_run=self.dry_run)
             progress.advance(task)
+
+            # Step 2b: Wait for Apollo async phone reveals before scoring.
+            # Apollo delivers revealed Indian mobiles to the webhook ~5 min
+            # after the sync call. Blocks here until all pending are patched
+            # or 10 min timeout.
+            progress.update(task, description="[yellow]Waiting for Apollo async phones…")
+            self._wait_for_apollo_phones()
 
             # Normalize fields for v1 modules
             enriched = [_normalize_lead_fields(l) for l in enriched]
@@ -240,6 +249,7 @@ class GTMEngineV2:
 
     def _run_enrich(self) -> None:
         self.console.print("[bold]Running signals + enrichment…[/bold]\n")
+        self._auto_reconcile_apollo()
         cities = self._get_cities()
         self.all_signals = collect_all_signals(cities=cities, dry_run=self.dry_run)
         flat = [s for sigs in self.all_signals.values() for s in sigs]
@@ -280,6 +290,96 @@ class GTMEngineV2:
         self.console.print(f"\n  [green]WhatsApp: {sent}/{len(results)} sent[/green]")
 
     # ── Helpers ───────────────────────────────────────────────────────
+
+    def _auto_reconcile_apollo(self) -> None:
+        """Silently patch any Apollo async phone reveals that arrived since
+        the last run. Safe no-op when DB isn't configured or no reveals
+        are pending. Runs at the start of any phone-consuming flow.
+        """
+        if self.dry_run:
+            return
+        try:
+            from pipeline.apollo_reconciler import reconcile
+            summary = reconcile()
+            if summary.get("patched"):
+                self.console.print(
+                    f"  [dim]Apollo: patched {summary['patched']} "
+                    f"phone reveal(s) from prior runs[/dim]"
+                )
+        except Exception:
+            pass  # never block the pipeline on reconciler issues
+
+    def _wait_for_apollo_phones(
+        self,
+        timeout_seconds: int = 600,
+        poll_interval: int = 30,
+    ) -> None:
+        """Block until Apollo async phone reveals from this run are patched
+        or `timeout_seconds` elapses. Polls + reconciles every `poll_interval`.
+
+        Early-exits if no rows are awaiting reconciliation (dry-run, no DB,
+        or nothing fired).
+        """
+        if self.dry_run:
+            return
+
+        try:
+            import os
+            import time
+            import psycopg2
+            from pipeline.apollo_reconciler import reconcile
+
+            database_url = os.environ.get("DATABASE_URL", "")
+            if not database_url:
+                return
+
+            def _count_unpatched_recent() -> int:
+                try:
+                    conn = psycopg2.connect(database_url)
+                    with conn, conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) FROM pending_apollo_enrichments
+                            WHERE patched = FALSE
+                              AND created_at > now() - interval '15 minutes'
+                            """
+                        )
+                        return cur.fetchone()[0]
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            initial = _count_unpatched_recent()
+            if initial == 0:
+                return
+
+            self.console.print(
+                f"  [dim]Apollo: waiting on {initial} async phone reveal(s) "
+                f"(up to {timeout_seconds // 60} min)…[/dim]"
+            )
+            start = time.time()
+            patched_total = 0
+            while time.time() - start < timeout_seconds:
+                time.sleep(poll_interval)
+                summary = reconcile()
+                patched_total += summary.get("patched", 0)
+                remaining = _count_unpatched_recent()
+                if remaining == 0:
+                    break
+
+            if patched_total:
+                self.console.print(
+                    f"  [green]Apollo: patched {patched_total} phone(s)[/green]"
+                )
+            else:
+                self.console.print(
+                    "  [yellow]Apollo: no phones arrived within timeout "
+                    "(briefing will have email/WA only)[/yellow]"
+                )
+        except Exception:
+            pass  # never block the pipeline on reconciler issues
 
     def _get_cities(self) -> list[str]:
         if self.args.city:

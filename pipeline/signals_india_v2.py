@@ -310,13 +310,20 @@ class TracxnFundingCollector:
         founder_linkedin = ((key_person.get("profileLinks") or {}).get("linkedinHandle"))
         founder_email = ((key_person.get("emailInfo") or {}).get("primaryEmail"))
 
-        # Company contact — Tracxn returns countryCode either as "+91" or "91";
-        # normalise to a single leading "+".
+        # Company contact — Tracxn returns countryCode as "+91"/"91"/""
+        # and number as either "+918056..." or "8056...". Strip any leading
+        # "+" from both parts before concatenating so we never end up with
+        # double "+" when countryCode is empty but number already has one.
         contact_list = co.get("contactNumberList") or []
         if contact_list:
-            cc = str(contact_list[0].get("countryCode") or "").lstrip("+")
-            num = str(contact_list[0].get("number") or "").lstrip("+")
-            company_phone = f"+{cc}{num}" if cc else (f"+{num}" if num else "")
+            cc = str(contact_list[0].get("countryCode") or "").lstrip("+").strip()
+            num = str(contact_list[0].get("number") or "").lstrip("+").strip()
+            if cc and num:
+                company_phone = f"+{cc}{num}"
+            elif num:
+                company_phone = f"+{num}"
+            else:
+                company_phone = ""
         else:
             company_phone = ""
         email_list = co.get("emailList") or []

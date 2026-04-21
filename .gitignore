@@ -23,3 +23,33 @@ results/
 
 # Local test / scratch scripts
 test_apollo_*.py
+show_messages.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Local DB dumps
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Logs
+*.log
+logs/
+
+# Claude Code per-developer settings (keep project-level .claude/settings.json shared)
+.claude/settings.local.json
