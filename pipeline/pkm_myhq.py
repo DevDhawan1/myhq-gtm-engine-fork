@@ -33,6 +33,8 @@ from config.settings_v2 import (
     AIRTABLE_API_KEY,
     AIRTABLE_BASE_ID,
     ANTHROPIC_API_KEY,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
     CITIES,
     PERSONAS,
 )
@@ -59,12 +61,23 @@ class PKMProfiler:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.client = None
-        if not dry_run and ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if not dry_run and OPENROUTER_API_KEY:
             try:
-                from anthropic import Anthropic
-                self.client = Anthropic()
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception as e:
-                logger.warning("Could not init Anthropic client: %s", e)
+                logger.warning("Could not init OpenRouter client: %s", e)
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if not dry_run and ANTHROPIC_API_KEY:
+        #     try:
+        #         from anthropic import Anthropic
+        #         self.client = Anthropic()
+        #     except Exception as e:
+        #         logger.warning("Could not init Anthropic client: %s", e)
 
     def profile_prospect(self, lead: dict) -> dict:
         """Profile a prospect and return PKM defense mode + bypass strategy.
@@ -148,13 +161,24 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-haiku-4-5
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=400,
-                system="Return only valid JSON. No preamble.",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "Return only valid JSON. No preamble."},
+                    {"role": "user", "content": prompt},
+                ],
             )
-            return json.loads(resp.content[0].text)
+            return json.loads(resp.choices[0].message.content)
+            # REVERT TO ANTHROPIC:
+            # resp = self.client.messages.create(
+            #     model="claude-haiku-4-5-20251001",
+            #     max_tokens=400,
+            #     system="Return only valid JSON. No preamble.",
+            #     messages=[{"role": "user", "content": prompt}],
+            # )
+            # return json.loads(resp.content[0].text)
         except Exception as e:
             logger.warning("PKM AI classify failed: %s — falling back to rules", e)
             return self._rule_based_profile(lead)
@@ -288,12 +312,23 @@ class OutreachGeneratorV2:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.client = None
-        if not dry_run and ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if not dry_run and OPENROUTER_API_KEY:
             try:
-                from anthropic import Anthropic
-                self.client = Anthropic()
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception:
                 pass
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if not dry_run and ANTHROPIC_API_KEY:
+        #     try:
+        #         from anthropic import Anthropic
+        #         self.client = Anthropic()
+        #     except Exception:
+        #         pass
 
     def generate_for_lead(self, lead: dict) -> dict:
         """Generate all outreach messages for a lead. PKM is MANDATORY."""
@@ -373,13 +408,24 @@ Estimated seats: {est_desks}
 Write 3 messages. WhatsApp first — India is WhatsApp-first."""
 
         try:
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-haiku-4-5
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=600,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
-            return json.loads(resp.content[0].text)
+            return json.loads(resp.choices[0].message.content)
+            # REVERT TO ANTHROPIC:
+            # resp = self.client.messages.create(
+            #     model="claude-haiku-4-5-20251001",
+            #     max_tokens=600,
+            #     system=system_prompt,
+            #     messages=[{"role": "user", "content": user_prompt}],
+            # )
+            # return json.loads(resp.content[0].text)
         except Exception as e:
             logger.warning("AI outreach generation failed: %s — using rule-based", e)
             return self._rule_based_messages(
@@ -400,11 +446,14 @@ Write 3 messages. WhatsApp first — India is WhatsApp-first."""
             subj = f"{company} x myHQ — {city_name} desks ready"
             body = (
                 f"Hi {first_name},\n\n"
-                f"Saw {signal_detail}. myHQ has managed offices in {city_name} — "
-                f"{est_desks} seats, ready in 48 hours, no lock-in.\n\n"
+                f"Saw {company} just {signal_detail}. myHQ has managed offices in "
+                f"{city_name} — {est_desks} seats, ready in 48 hours, no lock-in.\n\n"
                 f"Worth exploring?\n\nBest,\nmyHQ Team"
             )
-            li = f"Hi {first_name}, saw {signal_detail}. myHQ has {est_desks} desks in {city_name} — ready in 48h."
+            li = (
+                f"Hi {first_name}, saw {company} just {signal_detail}. "
+                f"myHQ has {est_desks} desks in {city_name} — ready in 48h."
+            )
         elif persona == 2:
             wa = (
                 f"Hi {first_name} — {company} is hiring fast in {city_name}. "

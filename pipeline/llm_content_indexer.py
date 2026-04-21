@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from config.settings_v2 import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, ANTHROPIC_API_KEY
+from config.settings_v2 import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENROUTER_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +82,23 @@ class LLMContentGenerator:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.client = None
-        if ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if OPENROUTER_API_KEY:
             try:
-                from anthropic import Anthropic
-                self.client = Anthropic()
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception:
                 pass
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if ANTHROPIC_API_KEY:
+        #     try:
+        #         from anthropic import Anthropic
+        #         self.client = Anthropic()
+        #     except Exception:
+        #         pass
 
     def generate_content(self, spec: dict) -> dict:
         """Generate a structured content piece using Claude Sonnet."""
@@ -95,35 +106,35 @@ class LLMContentGenerator:
             return self._synthetic_content(spec)
 
         try:
-            resp = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-sonnet-4
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=1500,
-                system=(
-                    "You write authoritative B2B content for myHQ — India's coworking marketplace.\n\n"
-                    "Rules:\n"
-                    "- Under 800 words\n"
-                    "- Include real numbers (prices INR, seat counts, real locations)\n"
-                    "- Structure with H2 headers, short paragraphs\n"
-                    "- Include FAQ section (5 questions) with Schema.org FAQPage JSON-LD\n"
-                    "- Write like a local who knows India's market\n"
-                    "- Never use: game-changer, leverage, seamlessly, robust, holistic\n"
-                    "- Always mention: 48-hour setup, no lock-in lease\n"
-                    "- CTA: myhq.in"
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": (
+                        "You write authoritative B2B content for myHQ — India's coworking marketplace.\n\n"
+                        "Rules:\n"
+                        "- Under 800 words\n"
+                        "- Include real numbers (prices INR, seat counts, real locations)\n"
+                        "- Structure with H2 headers, short paragraphs\n"
+                        "- Include FAQ section (5 questions) with Schema.org FAQPage JSON-LD\n"
+                        "- Write like a local who knows India's market\n"
+                        "- Never use: game-changer, leverage, seamlessly, robust, holistic\n"
+                        "- Always mention: 48-hour setup, no lock-in lease\n"
+                        "- CTA: myhq.in"
+                    )},
+                    {"role": "user", "content": (
                         f"Title: {spec['title']}\n"
                         f"Type: {spec['type']}\n"
                         f"Focus: {spec['focus']}\n"
                         f"Target queries: {', '.join(spec['target_queries'])}\n\n"
                         "Include: Opening paragraph with key insight, 3-4 H2 sections, "
                         "comparison table if relevant, FAQ with 5 questions, Schema.org JSON-LD."
-                    ),
-                }],
+                    )},
+                ],
             )
 
-            content_text = resp.content[0].text
+            content_text = resp.choices[0].message.content
         except Exception as e:
             logger.warning("Content generation failed: %s", e)
             return self._synthetic_content(spec)
@@ -179,27 +190,27 @@ class LLMContentGenerator:
             return f"[Reddit draft] {content['title']}"
 
         try:
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-haiku-4-5
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=500,
-                system=(
-                    "Write a Reddit post about coworking in India. "
-                    "Sound like a genuine Redditor, not a company. "
-                    "Helpful, specific, genuine. No promotional language. "
-                    "Format: Title on first line, then body."
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": (
+                        "Write a Reddit post about coworking in India. "
+                        "Sound like a genuine Redditor, not a company. "
+                        "Helpful, specific, genuine. No promotional language. "
+                        "Format: Title on first line, then body."
+                    )},
+                    {"role": "user", "content": (
                         f"Based on this myHQ content, write a Reddit post:\n"
                         f"Title: {content['title']}\n"
                         f"Type: {content['type']}\n\n"
                         "Sound like someone in the Indian startup ecosystem. "
                         "Include specific numbers. End with a question."
-                    ),
-                }],
+                    )},
+                ],
             )
-            return resp.content[0].text
+            return resp.choices[0].message.content
         except Exception:
             return f"[Reddit draft] {content['title']}"
 

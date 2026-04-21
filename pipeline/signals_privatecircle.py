@@ -54,7 +54,8 @@ def fetch_new_filings(city_code: str, days_back: int = 7) -> list[dict]:
     New subsidiary or capital allotment = expansion signal.
     """
     if not PRIVATECIRCLE_API_KEY:
-        return _synthetic_filings(city_code)
+        logger.debug("PRIVATECIRCLE_API_KEY not set — skipping filings")
+        return []
 
     cities = CITY_MAP.get(city_code, [city_code])
     signals: list[dict] = []

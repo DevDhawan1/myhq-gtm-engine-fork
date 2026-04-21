@@ -32,6 +32,8 @@ from config.settings_v2 import (
     AIRTABLE_API_KEY,
     AIRTABLE_BASE_ID,
     ANTHROPIC_API_KEY,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
     SMTP_PASS,
     SMTP_USER,
 )
@@ -289,38 +291,57 @@ class ReplyClassifier:
 
     def __init__(self):
         self.client = None
-        if ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if OPENROUTER_API_KEY:
             try:
-                from anthropic import Anthropic
-                self.client = Anthropic()
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception:
                 pass
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if ANTHROPIC_API_KEY:
+        #     try:
+        #         from anthropic import Anthropic
+        #         self.client = Anthropic()
+        #     except Exception:
+        #         pass
 
     def classify(self, reply_text: str, company: str, original_defense: str) -> dict:
         if not self.client:
             return {"category": "UNKNOWN", "next_action": "Manual review", "urgency": "today"}
 
         try:
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-haiku-4-5
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=200,
-                system=(
-                    "Classify this WhatsApp reply from an Indian B2B prospect for myHQ. "
-                    "Return JSON only:\n"
-                    '{"category": "HOT|OBJECTION|REFERRAL|NOT_NOW|UNSUBSCRIBE|UNKNOWN", '
-                    '"next_action": "one sentence", "urgency": "immediate|today|this_week|archive", '
-                    '"key_info": "names, emails, dates mentioned"}'
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": (
+                        "Classify this WhatsApp reply from an Indian B2B prospect for myHQ. "
+                        "Return JSON only:\n"
+                        '{"category": "HOT|OBJECTION|REFERRAL|NOT_NOW|UNSUBSCRIBE|UNKNOWN", '
+                        '"next_action": "one sentence", "urgency": "immediate|today|this_week|archive", '
+                        '"key_info": "names, emails, dates mentioned"}'
+                    )},
+                    {"role": "user", "content": (
                         f"Company: {company}\n"
                         f"Original defense: {original_defense}\n"
                         f"Reply: {reply_text}"
-                    ),
-                }],
+                    )},
+                ],
             )
-            return json.loads(resp.content[0].text)
+            return json.loads(resp.choices[0].message.content)
+            # REVERT TO ANTHROPIC:
+            # resp = self.client.messages.create(
+            #     model="claude-haiku-4-5-20251001",
+            #     max_tokens=200,
+            #     system=(...),
+            #     messages=[{"role": "user", "content": ...}],
+            # )
+            # return json.loads(resp.content[0].text)
         except Exception:
             return {"category": "UNKNOWN", "next_action": "Manual review", "urgency": "today"}
 

@@ -79,6 +79,11 @@ def run_job(job_name: str) -> None:
         content = run_weekly_content_generation()
         logger.info("Content generated: %d pieces", len(content))
 
+    elif job_name == "reconcile-apollo":
+        from pipeline.apollo_reconciler import reconcile
+        summary = reconcile()
+        logger.info("Apollo reconcile: %s", summary)
+
     else:
         logger.error("Unknown job: %s", job_name)
         sys.exit(1)
@@ -89,7 +94,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--job",
         required=True,
-        choices=["signals", "enrich", "whatsapp", "replies", "competitors", "content"],
+        choices=["signals", "enrich", "whatsapp", "replies", "competitors", "content", "reconcile-apollo"],
     )
     args = parser.parse_args()
     run_job(args.job)

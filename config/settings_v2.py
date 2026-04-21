@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Signal Detection APIs (India-primary) ────────────────────────────
+DATAGOV_API_KEY: str = os.getenv("DATAGOV_API_KEY", "")
+DATAGOV_RESOURCE_ID: str = os.getenv("DATAGOV_RESOURCE_ID", "")
 TRACXN_API_KEY: str = os.getenv("TRACXN_API_KEY", "")
 CRUNCHBASE_API_KEY: str = os.getenv("CRUNCHBASE_API_KEY", "")
 NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
@@ -16,6 +18,8 @@ APIFY_TOKEN: str = os.getenv("APIFY_TOKEN", "")
 
 # ── Contact Enrichment (waterfall) ───────────────────────────────────
 APOLLO_API_KEY: str = os.getenv("APOLLO_API_KEY", "")
+APOLLO_WEBHOOK_URL: str = os.getenv("APOLLO_WEBHOOK_URL", "")
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 PDL_API_KEY: str = os.getenv("PDL_API_KEY", "")
 NETROWS_API_KEY: str = os.getenv("NETROWS_API_KEY", "")
 LUSHA_API_KEY: str = os.getenv("LUSHA_API_KEY", "")
@@ -30,6 +34,8 @@ WHATSAPP_PHONE_ID: str = os.getenv("WHATSAPP_PHONE_ID", "")
 
 # ── AI + Memory ──────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b")
 AIRTABLE_API_KEY: str = os.getenv("AIRTABLE_API_KEY", "")
 AIRTABLE_BASE_ID: str = os.getenv("AIRTABLE_BASE_ID", "")
 

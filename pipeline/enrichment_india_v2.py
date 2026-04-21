@@ -35,6 +35,8 @@ import requests
 
 from config.settings_v2 import (
     APOLLO_API_KEY,
+    APOLLO_WEBHOOK_URL,
+    DATABASE_URL,
     HUNTER_API_KEY,
     LUSHA_API_KEY,
     MILLIONVERIFIER_KEY,
@@ -47,6 +49,40 @@ from config.settings_v2 import (
 logger = logging.getLogger(__name__)
 
 _INDIAN_MOBILE_RE = re.compile(r"^\+?91[6-9]\d{9}$")
+
+
+def _record_pending_enrichment(
+    apollo_person_id: str,
+    name: str,
+    company: str,
+    linkedin_url: str,
+    email: str | None,
+) -> None:
+    """Record that we're awaiting an async Apollo webhook for this lead.
+
+    Silent no-op if DATABASE_URL missing or insert fails — we don't want DB
+    issues to break the sync enrichment path.
+    """
+    if not DATABASE_URL or not apollo_person_id:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pending_apollo_enrichments
+                        (apollo_person_id, lead_name, lead_company, lead_linkedin, lead_email)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (apollo_person_id) DO NOTHING
+                    """,
+                    (apollo_person_id, name, company, linkedin_url, email),
+                )
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("pending_apollo_enrichments insert failed: %s", e)
 
 
 class ContactEnricher:
@@ -72,9 +108,10 @@ class ContactEnricher:
 
         company = signal.get("company_name", "")
         founder = signal.get("founder_name", "")
-        website = signal.get("website", "")
+        website = signal.get("website") or signal.get("domain", "")
+        founder_linkedin = signal.get("founder_linkedin") or ""
 
-        contact = self._waterfall_enrich(founder, company, website)
+        contact = self._waterfall_enrich(founder, company, website, founder_linkedin)
 
         # If no contact name from enrichment, use signal's founder_name
         if not contact.get("name") and founder:
@@ -106,21 +143,33 @@ class ContactEnricher:
 
     # ── Waterfall enrichment ──────────────────────────────────────────
 
-    def _waterfall_enrich(self, name: str, company: str, website: str) -> dict:
+    def _waterfall_enrich(self, name: str, company: str, website: str,
+                          linkedin_url: str = "") -> dict:
         result = {
             "name": "", "email": None, "phone_mobile": None,
-            "linkedin_url": None, "title": None,
+            "linkedin_url": linkedin_url or None, "title": None,
             "enrichment_source": None,
         }
 
         domain = self._extract_domain(website)
 
-        # Step 1: Apollo
-        if APOLLO_API_KEY:
-            apollo = self._apollo_enrich(name, company, domain)
+        # Step 1: Apollo person match (works best when we have a name or LinkedIn)
+        if APOLLO_API_KEY and (name or linkedin_url):
+            apollo = self._apollo_enrich(name, company, domain, linkedin_url)
             if apollo.get("email"):
                 result.update(apollo)
                 result["enrichment_source"] = "apollo"
+
+        # Step 1b: Apollo org search — find decision makers by company name
+        # (critical for news signals where we have company but no person name)
+        if not result["email"] and APOLLO_API_KEY and company:
+            apollo_org = self._apollo_org_search(company)
+            if apollo_org.get("email"):
+                result.update(apollo_org)
+                result["enrichment_source"] = "apollo_org"
+            # Also grab the domain if we didn't have one
+            if not domain and apollo_org.get("domain"):
+                domain = apollo_org["domain"]
 
         # Step 2: People Data Labs (if Apollo missed)
         if not result["email"] and PDL_API_KEY:
@@ -130,8 +179,6 @@ class ContactEnricher:
                 result["enrichment_source"] = "pdl"
 
         # Step 3: Netrows (if still no email or need LinkedIn)
-        # Netrows replaces Proxycurl (shut down by LinkedIn lawsuit Jan 2025)
-        # 48+ LinkedIn endpoints, €0.005/req, real-time data
         if (not result["email"] or not result["linkedin_url"]) and NETROWS_API_KEY:
             netrows = self._netrows_enrich(name, company)
             if netrows:
@@ -145,31 +192,54 @@ class ContactEnricher:
             if lusha.get("phone_mobile"):
                 result["phone_mobile"] = lusha["phone_mobile"]
 
-        # Step 5: Hunter.io (email-only fallback)
-        if not result["email"] and domain and HUNTER_API_KEY:
-            hunter = self._hunter_enrich(name, domain)
-            if hunter.get("email"):
-                result["email"] = hunter["email"]
-                if not result["enrichment_source"]:
-                    result["enrichment_source"] = "hunter"
+        # Step 5: Hunter.io domain search (find emails at a company domain)
+        if not result["email"] and HUNTER_API_KEY:
+            # If we have a domain, search it; otherwise try to find the domain first
+            if not domain and company:
+                domain = self._hunter_find_domain(company)
+            if domain:
+                hunter = self._hunter_domain_search(domain)
+                if hunter.get("email"):
+                    result.update({k: v for k, v in hunter.items() if v and not result.get(k)})
+                    if not result["enrichment_source"]:
+                        result["enrichment_source"] = "hunter"
 
         return result
 
-    def _apollo_enrich(self, name: str, company: str, domain: str | None) -> dict:
+    def _apollo_enrich(self, name: str, company: str, domain: str | None,
+                       linkedin_url: str = "") -> dict:
         try:
-            payload: dict = {
-                "name": name,
-                "organization_name": company,
-            }
+            payload: dict = {}
+            if name:
+                payload["name"] = name
+            if company:
+                payload["organization_name"] = company
             if domain:
                 payload["domain"] = domain
+            # LinkedIn URL dramatically improves Apollo match rate for Indian founders
+            if linkedin_url:
+                payload["linkedin_url"] = linkedin_url
+
+            # Apollo rejects reveal_phone_number=true with HTTP 400 unless a
+            # webhook_url is also provided (revealed phones are delivered
+            # async). Without a webhook, fall back to plain enrichment —
+            # still returns cached emails/names/titles, just no fresh phones.
+            params: dict = {}
+            if APOLLO_WEBHOOK_URL:
+                params["reveal_phone_number"] = "true"
+                params["webhook_url"] = APOLLO_WEBHOOK_URL
+                params["run_waterfall_email"] = "true"
+                params["run_waterfall_phone"] = "true"
 
             resp = requests.post(
                 "https://api.apollo.io/api/v1/people/match",
                 headers={
                     "Content-Type": "application/json",
+                    "Cache-Control": "no-cache",
+                    "accept": "application/json",
                     "x-api-key": APOLLO_API_KEY,
                 },
+                params=params,
                 json=payload,
                 timeout=12,
             )
@@ -181,15 +251,79 @@ class ContactEnricher:
             phones = person.get("phone_numbers", [])
             mobile = phones[0].get("raw_number") if phones else None
 
+            # When waterfall is active, phones arrive async via webhook —
+            # record the Apollo person id so the reconciler can join back.
+            if APOLLO_WEBHOOK_URL and person.get("id"):
+                _record_pending_enrichment(
+                    apollo_person_id=person["id"],
+                    name=person.get("name", name),
+                    company=company,
+                    linkedin_url=person.get("linkedin_url") or linkedin_url,
+                    email=person.get("email"),
+                )
+
             return {
                 "name": person.get("name", name),
                 "email": person.get("email"),
                 "phone_mobile": self._format_indian_phone(mobile),
                 "linkedin_url": person.get("linkedin_url"),
                 "title": person.get("title"),
+                "apollo_person_id": person.get("id"),
             }
         except Exception as e:
             logger.debug("Apollo enrich failed: %s", e)
+            return {}
+
+    def _apollo_org_search(self, company: str) -> dict:
+        """Search Apollo for decision makers at a company by org name.
+
+        Used when we have a company name (from news) but no person name.
+        Searches for people with senior titles at the organization.
+        """
+        try:
+            resp = requests.post(
+                "https://api.apollo.io/api/v1/mixed_people/search",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": APOLLO_API_KEY,
+                },
+                json={
+                    "organization_name": company,
+                    "person_titles": [
+                        "Founder", "Co-founder", "CEO", "CTO",
+                        "COO", "Managing Director", "Director",
+                    ],
+                    "person_locations": ["India"],
+                    "per_page": 3,
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            people = resp.json().get("people", [])
+            if not people:
+                return {}
+
+            # Pick the first decision maker with an email
+            for person in people:
+                email = person.get("email")
+                if email:
+                    phones = person.get("phone_numbers", [])
+                    mobile = phones[0].get("raw_number") if phones else None
+                    org = person.get("organization", {})
+                    return {
+                        "name": person.get("name", ""),
+                        "email": email,
+                        "phone_mobile": self._format_indian_phone(mobile),
+                        "linkedin_url": person.get("linkedin_url"),
+                        "title": person.get("title"),
+                        "domain": org.get("primary_domain"),
+                    }
+
+            # No email found, but return domain if we got it
+            org = people[0].get("organization", {})
+            return {"domain": org.get("primary_domain")}
+        except Exception as e:
+            logger.debug("Apollo org search failed: %s", e)
             return {}
 
     def _pdl_enrich(self, name: str, company: str, domain: str | None) -> dict:
@@ -312,24 +446,64 @@ class ContactEnricher:
             logger.debug("Lusha enrich failed: %s", e)
             return {}
 
-    def _hunter_enrich(self, name: str, domain: str) -> dict:
+    def _hunter_find_domain(self, company: str) -> str | None:
+        """Use Hunter's Company Finder to get a domain from a company name."""
         try:
-            parts = name.split() if name else [""]
             resp = requests.get(
-                "https://api.hunter.io/v2/email-finder",
+                "https://api.hunter.io/v2/domain-search",
                 params={
-                    "domain": domain,
-                    "first_name": parts[0],
-                    "last_name": parts[-1] if len(parts) > 1 else "",
+                    "company": company,
                     "api_key": HUNTER_API_KEY,
+                    "limit": 1,
                 },
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json().get("data", {})
-            return {"email": data.get("email")}
+            domain = data.get("domain")
+            if domain:
+                logger.debug("Hunter found domain for %s: %s", company, domain)
+            return domain
         except Exception as e:
-            logger.debug("Hunter enrich failed: %s", e)
+            logger.debug("Hunter domain finder failed: %s", e)
+            return None
+
+    def _hunter_domain_search(self, domain: str) -> dict:
+        """Search Hunter for emails at a domain — returns the top decision maker."""
+        try:
+            resp = requests.get(
+                "https://api.hunter.io/v2/domain-search",
+                params={
+                    "domain": domain,
+                    "api_key": HUNTER_API_KEY,
+                    "limit": 5,
+                    "seniority": "senior,executive",
+                    "department": "executive,management",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            emails = data.get("emails", [])
+            if not emails:
+                return {}
+
+            # Pick the first person with a valid email
+            for person in emails:
+                email = person.get("value")
+                if email:
+                    first = person.get("first_name", "")
+                    last = person.get("last_name", "")
+                    name = f"{first} {last}".strip()
+                    return {
+                        "name": name,
+                        "email": email,
+                        "title": person.get("position"),
+                        "linkedin_url": person.get("linkedin"),
+                    }
+            return {}
+        except Exception as e:
+            logger.debug("Hunter domain search failed: %s", e)
             return {}
 
     # ── Verification ──────────────────────────────────────────────────

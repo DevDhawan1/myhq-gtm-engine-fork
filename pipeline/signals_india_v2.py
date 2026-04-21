@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -28,6 +29,8 @@ from config.settings_v2 import (
     APIFY_TOKEN,
     CITIES,
     CRUNCHBASE_API_KEY,
+    DATAGOV_API_KEY,
+    DATAGOV_RESOURCE_ID,
     NEWS_API_KEY,
     NETROWS_API_KEY,
     TRACXN_API_KEY,
@@ -47,63 +50,101 @@ class MCASignalCollector:
     """Fetch companies newly incorporated via MCA (Ministry of Corporate Affairs).
 
     MCA data is free and authoritative — a new CIN is the hardest
-    expansion signal available. Uses araystech/mca-data-api wrapper.
+    expansion signal available.
+
+    Uses data.gov.in OGD API (free, requires registration at https://data.gov.in).
+    Set DATAGOV_API_KEY and DATAGOV_RESOURCE_ID in .env.
     """
 
-    # MCA public API via araystech wrapper
-    BASE_URL = "https://mca-data-api.onrender.com"
+    BASE_URL = "https://api.data.gov.in/resource"
 
-    def collect(self, cities: list[str], days_back: int = 14) -> list[dict]:
+    def collect(self, cities: list[str], days_back: int = 90) -> list[dict]:
+        """Fetch recently incorporated companies.
+
+        days_back defaults to 90 because data.gov.in updates monthly —
+        the dataset may lag by several weeks.
+        """
+        if not DATAGOV_API_KEY:
+            logger.warning("DATAGOV_API_KEY not set — skipping MCA signals. "
+                           "Register free at https://data.gov.in to get a key.")
+            return []
+        if not DATAGOV_RESOURCE_ID:
+            logger.warning("DATAGOV_RESOURCE_ID not set — skipping MCA signals. "
+                           "Find the Company Master Data resource ID at data.gov.in.")
+            return []
+
         signals: list[dict] = []
+        cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+        # Collect unique states (MUM and PUN both map to Maharashtra)
+        seen_states: set[str] = set()
+        state_to_cities: dict[str, list[str]] = {}
         for city_code in cities:
-            city_info = CITIES.get(city_code, {})
-            state = city_info.get("mca_state", "")
-            if not state:
+            state = CITIES.get(city_code, {}).get("mca_state", "")
+            if not state or state in seen_states:
+                if state and state in state_to_cities:
+                    state_to_cities[state].append(city_code)
                 continue
+            seen_states.add(state)
+            state_to_cities[state] = [city_code]
+
+        for state, city_codes in state_to_cities.items():
             try:
+                # data.gov.in uses lowercase state names and PascalCase fields
                 resp = requests.get(
-                    f"{self.BASE_URL}/api/companies",
+                    f"{self.BASE_URL}/{DATAGOV_RESOURCE_ID}",
                     params={
-                        "state": state,
-                        "days": days_back,
-                        "status": "Active",
-                        "limit": 50,
+                        "api-key": DATAGOV_API_KEY,
+                        "format": "json",
+                        "limit": 500,
+                        "filters[CompanyStateCode]": state.lower(),
+                        "filters[CompanyStatus]": "Active",
+                        "filters[CompanyClass]": "Private",
                     },
-                    timeout=20,
+                    timeout=30,
                 )
                 resp.raise_for_status()
-                companies = resp.json().get("data", [])
+                data = resp.json()
+                records = data.get("records", [])
 
-                for co in companies:
-                    # Filter: only Private Limited / LLP (startups)
-                    company_class = co.get("company_class", "").lower()
-                    if "private" not in company_class and "llp" not in company_class:
+                count = 0
+                for co in records:
+                    # Filter: only recent registrations (date filtering
+                    # must be client-side — API only does exact match)
+                    reg_date = co.get("CompanyRegistrationdate_date") or ""
+                    if reg_date and reg_date < cutoff:
                         continue
 
-                    signals.append(self._to_signal(co, city_code))
+                    # Assign to the first matching city for this state
+                    for cc in city_codes:
+                        signals.append(self._to_signal(co, cc))
+                        count += 1
+                        break
 
-                logger.info("MCA %s: %d new incorporations", city_code, len(companies))
+                logger.info("MCA %s: %d new incorporations (data.gov.in)", state, count)
             except Exception as e:
-                logger.warning("MCA %s failed: %s", city_code, e)
+                logger.warning("MCA %s failed: %s", state, e)
 
         return signals
 
     def _to_signal(self, co: dict, city_code: str) -> dict:
+        company_name = co.get("CompanyName") or "Unknown"
+        cin = co.get("CIN") or ""
         return {
-            "company_name": co.get("company_name", "Unknown"),
-            "cin": co.get("cin", ""),
+            "company_name": company_name,
+            "cin": cin,
             "city": city_code,
             "signal_type": "MCA_NEW_SUBSIDIARY",
-            "signal_detail": f"New incorporation: {co.get('company_name')} (CIN: {co.get('cin', 'N/A')})",
+            "signal_detail": f"New incorporation: {company_name} (CIN: {cin or 'N/A'})",
             "urgency_hours": TRIGGER_SIGNALS["MCA_NEW_SUBSIDIARY"]["urgency_hours"],
             "persona": TRIGGER_SIGNALS["MCA_NEW_SUBSIDIARY"]["persona"],
             "confidence_score": 90,
             "employee_count": None,
-            "sector": co.get("principal_business_activity", ""),
-            "founder_name": co.get("director_name", ""),
+            "sector": co.get("CompanyIndustrialClassification") or "",
+            "founder_name": "",
             "founder_linkedin": None,
             "website": None,
-            "raw_source": "mca",
+            "raw_source": "mca_datagov",
             "detected_at": datetime.now(IST).isoformat(),
         }
 
@@ -115,71 +156,226 @@ class MCASignalCollector:
 class TracxnFundingCollector:
     """Fetch recent Indian startup funding rounds from Tracxn API.
 
-    Tracxn has structured India funding data with:
-    - Company name, CIN, website
-    - Funding amount, round type (Seed, Series A, etc.)
-    - Lead investor names
-    - Sector, employee count
-    - Founder details
+    Endpoint: POST https://platform.tracxn.com/api/2.2/companies
+    Auth: header `accessToken: <TRACXN_API_KEY>`
 
-    Signal: Any Seed, Pre-Series A, Series A = 48h urgency for myHQ
+    The API rejects requests with more than 2 filters or with `companyStage`/`sort`
+    blocks (returns 400), so we filter only by `latestFundingRoundDate` (DD/MM/YYYY)
+    and `location.country = ["India"]`. Stage and city filtering happens client-side.
     """
 
-    def collect(self, cities: list[str], days_back: int = 7) -> list[dict]:
+    BASE_URL = "https://platform.tracxn.com/api/2.2/companies"
+
+    ACCEPTED_STAGES = {
+        "Seed", "Early-Stage Funded", "Series A", "Series B",
+        "Angel", "Funding Raised",
+    }
+
+    # Tracxn reports raw city names; normalize to our internal city codes.
+    # Delhi-NCR collapses several satellite cities into one code.
+    CITY_NAME_TO_CODE = {
+        "bengaluru": "BLR", "bangalore": "BLR",
+        "mumbai": "MUM",
+        "delhi": "DEL", "new delhi": "DEL",
+        "gurugram": "DEL", "gurgaon": "DEL",
+        "noida": "DEL", "faridabad": "DEL",
+        "hyderabad": "HYD",
+        "pune": "PUN",
+        "chennai": "CHN",
+    }
+
+    # Cap on companies fetched per run (single page, no pagination).
+    # Bump this when scaling up — for now we keep API spend bounded.
+    MAX_COMPANIES = 30
+
+    def collect(self, cities: list[str], days_back: int = 14) -> list[dict]:
         if not TRACXN_API_KEY:
-            logger.info("TRACXN_API_KEY not set — using synthetic data")
-            return self._synthetic(cities)
+            logger.info("TRACXN_API_KEY not set — skipping funding signals")
+            return []
+
+        target_codes = {c.upper() for c in cities}
+        today = datetime.now(IST).date()
+        date_min = (today - timedelta(days=days_back)).strftime("%d/%m/%Y")
+        date_max = today.strftime("%d/%m/%Y")
+
+        body = {
+            "filter": {
+                "latestFundingRoundDate": {"min": date_min, "max": date_max},
+                "location": {"country": ["India"]},
+            },
+            "from": 0,
+            "size": self.MAX_COMPANIES,
+        }
+
+        try:
+            resp = requests.post(
+                self.BASE_URL,
+                headers={
+                    "accessToken": TRACXN_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("Tracxn fetch failed: %s", e)
+            return []
+
+        results = (data.get("result") or data.get("results") or [])[: self.MAX_COMPANIES]
 
         signals: list[dict] = []
-        city_names = {code: CITIES[code]["name"] for code in cities if code in CITIES}
+        for co in results:
+            # Stage filter (client-side)
+            stage = (co.get("stage") or "").strip()
+            if stage and stage not in self.ACCEPTED_STAGES:
+                continue
 
-        for city_code, city_name in city_names.items():
-            try:
-                resp = requests.get(
-                    "https://tracxn.com/api/2.2/companies/search",
-                    headers={"accessToken": TRACXN_API_KEY},
-                    params={
-                        "hqLocation": city_name,
-                        "hqCountry": "India",
-                        "fundedSinceDays": days_back,
-                        "roundType": "Seed,Pre-Series A,Series A",
-                        "limit": 50,
-                    },
-                    timeout=20,
-                )
-                resp.raise_for_status()
-                companies = resp.json().get("results", [])
+            # Noise filter: drop grants with no disclosed amount.
+            # Accelerator grants (e.g. "Saksham") flood the feed with
+            # tiny non-actionable signals — skip if amount missing and
+            # the round name contains "grant".
+            latest = (co.get("fundingInfo") or {}).get("latestRoundInfo") or {}
+            round_name = (latest.get("name") or "")
+            amount_val = ((latest.get("amount") or {}).get("amount"))
+            if amount_val is None and "grant" in round_name.lower():
+                continue
 
-                for co in companies:
-                    signals.append(self._to_signal(co, city_code))
+            # City filter (client-side)
+            city_code = self._resolve_city_code(co)
+            if not city_code or city_code not in target_codes:
+                continue
 
-                logger.info("Tracxn %s: %d funding signals", city_code, len(companies))
-            except Exception as e:
-                logger.warning("Tracxn %s: %s", city_code, e)
+            signals.append(self._to_signal(co, city_code))
 
+        logger.info(
+            "Tracxn: %d signals from %d companies (window=%dd, cap=%d, cities=%d)",
+            len(signals), len(results), days_back, self.MAX_COMPANIES, len(target_codes),
+        )
         return signals
 
+    def _resolve_city_code(self, co: dict) -> str | None:
+        # Try result.location.city first, then result.locations[0].city.name
+        loc = co.get("location") or {}
+        city = (loc.get("city") or "").strip()
+        if not city:
+            locs = co.get("locations") or []
+            if locs:
+                city = ((locs[0].get("city") or {}).get("name") or "").strip()
+        return self.CITY_NAME_TO_CODE.get(city.lower()) if city else None
+
     def _to_signal(self, co: dict, city_code: str) -> dict:
-        latest_round = co.get("latestRound", {})
-        founders = co.get("founders", [])
+        funding_info = co.get("fundingInfo") or {}
+        latest = funding_info.get("latestRoundInfo") or {}
+
+        # Funding date can be returned as either an ISO string or {day,month,year}
+        funding_date = latest.get("date")
+        detected_iso: str
+        if isinstance(funding_date, dict):
+            try:
+                detected_iso = datetime(
+                    int(funding_date.get("year")),
+                    int(funding_date.get("month", 1)),
+                    int(funding_date.get("day", 1)),
+                    tzinfo=IST,
+                ).isoformat()
+            except (TypeError, ValueError):
+                detected_iso = datetime.now(IST).isoformat()
+        elif isinstance(funding_date, str) and funding_date:
+            detected_iso = funding_date
+        else:
+            detected_iso = datetime.now(IST).isoformat()
+
+        amount_usd = ((latest.get("amount") or {}).get("amount"))
+        total_raised = (((co.get("totalMoneyRaised") or {}).get("totalAmount") or {}).get("amount"))
+
+        # Location may be in either result.location or result.locations[0].city
+        loc = co.get("location") or {}
+        loc_state = loc.get("state") or ""
+        loc_country = loc.get("country") or "India"
+        if not loc_state:
+            locs = co.get("locations") or []
+            if locs:
+                loc_state = ((locs[0].get("city") or {}).get("state") or "")
+
+        # Founder: first key person from employeeInfo.employeeList
+        employees = ((co.get("employeeInfo") or {}).get("employeeList") or [])
+        key_person = next(
+            (e for e in employees if e.get("isKeyPeople")),
+            employees[0] if employees else {},
+        )
+        founder_name = key_person.get("name") or ""
+        founder_title = key_person.get("designation") or ""
+        founder_linkedin = ((key_person.get("profileLinks") or {}).get("linkedinHandle"))
+        founder_email = ((key_person.get("emailInfo") or {}).get("primaryEmail"))
+
+        # Company contact — Tracxn returns countryCode either as "+91" or "91";
+        # normalise to a single leading "+".
+        contact_list = co.get("contactNumberList") or []
+        if contact_list:
+            cc = str(contact_list[0].get("countryCode") or "").lstrip("+")
+            num = str(contact_list[0].get("number") or "").lstrip("+")
+            company_phone = f"+{cc}{num}" if cc else (f"+{num}" if num else "")
+        else:
+            company_phone = ""
+        email_list = co.get("emailList") or []
+        company_email = email_list[0].get("email") if email_list else ""
+
+        news_list = ((co.get("newsInfo") or {}).get("newsList") or [])
+        news_headline = news_list[0].get("headLine") if news_list else ""
+        news_url = news_list[0].get("sourceUrl") if news_list else ""
+
+        round_name = latest.get("name") or "Funding"
+        # Format for India context: ₹ Cr/Lakh (assume USD→INR at 83)
+        if isinstance(amount_usd, (int, float)) and amount_usd > 0:
+            inr = amount_usd * 83
+            if inr >= 1e7:
+                amount_str = f"₹{inr / 1e7:.1f} Cr"
+            else:
+                amount_str = f"₹{inr / 1e5:.0f} L"
+            signal_detail = f"raised {amount_str} ({round_name} round)"
+        else:
+            signal_detail = f"closed a {round_name} round"
+
         return {
             "company_name": co.get("name", "Unknown"),
+            "domain": co.get("domain", ""),
+            "website": co.get("domain", ""),  # v1 compat
             "city": city_code,
+            "state": loc_state,
+            "country": loc_country,
+            "stage": co.get("stage") or "",
             "signal_type": "FUNDING",
-            "signal_detail": f"{latest_round.get('roundType', 'Seed')} — {latest_round.get('amount', 'Undisclosed')}",
+            "signal_detail": signal_detail,
             "urgency_hours": TRIGGER_SIGNALS["FUNDING"]["urgency_hours"],
             "persona": TRIGGER_SIGNALS["FUNDING"]["persona"],
-            "confidence_score": 95,
-            "employee_count": co.get("employeeCount"),
-            "sector": co.get("sector", ""),
-            "founder_name": founders[0].get("name") if founders else None,
-            "founder_linkedin": founders[0].get("linkedinUrl") if founders else None,
-            "website": co.get("domain", ""),
-            "investor_names": [inv.get("name") for inv in latest_round.get("investors", [])],
-            "amount_raised": latest_round.get("amount", ""),
-            "round_type": latest_round.get("roundType", "seed"),
+            "confidence_score": 0.9,
+            "round_type": round_name,
+            "amount_usd": float(amount_usd) if isinstance(amount_usd, (int, float)) else None,
+            "amount_raised": float(amount_usd) if isinstance(amount_usd, (int, float)) else None,
+            "funding_date": funding_date,
+            "detected_at": detected_iso,
+            "investor_names": [
+                inv.get("name") for inv in (latest.get("investorList") or []) if inv.get("name")
+            ],
+            "total_raised_usd": float(total_raised) if isinstance(total_raised, (int, float)) else None,
+            "description": ((co.get("description") or {}).get("short") or ""),
+            "tracxn_url": co.get("tracxnUrl", ""),
+            "tracxn_id": co.get("tracxnId", ""),
+            "company_linkedin": ((co.get("profileLinks") or {}).get("linkedIn")),
+            "news_headline": news_headline,
+            "news_url": news_url,
+            "founded_year": co.get("foundedYear"),
+            "founder_name": founder_name,
+            "founder_title": founder_title,
+            "founder_linkedin": founder_linkedin,
+            "founder_email": founder_email,
+            "company_phone": company_phone,
+            "company_email": company_email,
+            "employee_count": None,
+            "sector": "",
             "raw_source": "tracxn",
-            "detected_at": datetime.now(IST).isoformat(),
         }
 
     def _synthetic(self, cities: list[str]) -> list[dict]:
@@ -470,27 +666,48 @@ class HiringSignalCollector:
 class IndiaNewsSignalCollector:
     """Scan Indian startup news for workspace-intent signals.
 
-    Primary sources (all via NewsAPI):
-    - entrackr.com — funding + expansion news
-    - inc42.com — startup news
-    - yourstory.com — startup news
-    - economictimes.com/tech — enterprise expansion
+    Extracts real company names from news articles using regex patterns
+    common in Indian startup journalism (inc42, entrackr, yourstory, ET).
 
-    NLP triggers (Claude Haiku classifies):
-    - "expanding to [city]" → expansion signal
-    - "raised [amount]" → funding signal (dedup with Tracxn)
-    - "hiring [X] people" → hiring signal
-    - "new office in" → workspace-ready signal
-    - "return to office" → WFH reversal signal
+    Only keeps articles that name a specific company doing something
+    actionable (raising funding, hiring, expanding, opening offices).
     """
 
-    # Keywords that indicate workspace need
-    WORKSPACE_KEYWORDS = [
-        "expanding to", "new office", "opening office", "hired",
-        "hiring", "raised", "funding", "return to office",
-        "back to office", "hybrid work", "coworking", "office space",
-        "new city", "expanding operations",
+    # Regex patterns to extract company names from Indian startup headlines.
+    # Order matters — most specific patterns first.
+    # "in talks to raise" is extremely common in Indian business journalism.
+    COMPANY_PATTERNS = [
+        # "CompanyName in talks to raise $X" / "CompanyName is set to raise ₹X"
+        re.compile(r"^(?P<company>.+?)\s+(?:in\s+talks?\s+to|is\s+set\s+to|is\s+looking\s+to|is\s+in\s+talks?\s+to)\s+(?:raise|secure|bag|close|get)", re.IGNORECASE),
+        # "[Funding alert] CompanyName raises..." (inc42 style)
+        re.compile(r"^\[.*?\]\s*(?P<company>.+?)\s+(?:raises?|secures?|gets?)", re.IGNORECASE),
+        # "CompanyName raises ₹X Cr" / "CompanyName secures $X M funding"
+        re.compile(r"^(?P<company>.+?)\s+(?:raises?|secures?|gets?|bags?|closes?|lands?)\s+[\$₹€\d]", re.IGNORECASE),
+        # "CompanyName raises Series A" / "CompanyName raises seed round"
+        re.compile(r"^(?P<company>.+?)\s+(?:raises?|secures?|closes?)\s+(?:seed|series|pre-seed|pre-series|bridge|funding)", re.IGNORECASE),
+        # "CompanyName to hire X people" / "CompanyName hiring X engineers"
+        re.compile(r"^(?P<company>.+?)\s+(?:to\s+)?(?:hires?|hiring|plans?\s+to\s+hire|looking\s+to\s+hire)\s+\d", re.IGNORECASE),
+        # "CompanyName opens new office in City"
+        re.compile(r"^(?P<company>.+?)\s+(?:opens?|launches?|inaugurates?)\s+(?:new\s+)?(?:office|hub|centre|center|campus)", re.IGNORECASE),
+        # "CompanyName expands to City" / "CompanyName to expand operations"
+        re.compile(r"^(?P<company>.+?)\s+(?:expands?|expanding)\s+(?:to|in|into|operations)", re.IGNORECASE),
+        # "CompanyName plans City expansion"
+        re.compile(r"^(?P<company>.+?)\s+(?:plans?|announces?|unveils?)\s+.{0,20}(?:expansion|office|hiring|recruitment)", re.IGNORECASE),
+        # "CompanyName to set up / invest in / open office"
+        re.compile(r"^(?P<company>.+?)\s+to\s+(?:set up|open|launch|establish|invest)\s+", re.IGNORECASE),
     ]
+
+    # Reject articles matching these — not about a specific company signal
+    NOISE_PATTERNS = re.compile(
+        r"box\s+office|election|cricket|bollywood|movie|film\s+review|"
+        r"sensex|nifty|stock\s+market|mutual\s+fund|gold\s+price|"
+        r"horoscope|weather|ipl\s+|world\s+cup|"
+        r"top\s+\d+\s+|best\s+\d+\s+|list\s+of\s+|"
+        r"government\s+scheme|budget\s+202|union\s+budget|"
+        r"india\s+vs\s+|modi\s+|parliament|"
+        r"deals?\s+digest|newsletter|roundup|wrap\b|weekly\s+wrap",
+        re.IGNORECASE,
+    )
 
     def collect(self, cities: list[str], days_back: int = 7) -> list[dict]:
         if not NEWS_API_KEY:
@@ -498,6 +715,7 @@ class IndiaNewsSignalCollector:
             return []
 
         signals: list[dict] = []
+        seen_companies: set[str] = set()  # dedup across cities
         from_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
         for city_code in cities:
@@ -506,18 +724,16 @@ class IndiaNewsSignalCollector:
 
             for kw in keywords[:1]:  # one query per city to save credits
                 try:
+                    # Targeted query for startup/business news only
+                    query = f'"{kw}" AND (raises OR funding OR hiring OR "new office" OR expansion OR coworking)'
                     resp = requests.get(
                         "https://newsapi.org/v2/everything",
                         params={
-                            "q": f"startup office {kw}",
-                            "domains": ",".join([
-                                "entrackr.com", "inc42.com", "yourstory.com",
-                                "economictimes.com", "livemint.com",
-                            ]),
+                            "q": query,
                             "language": "en",
                             "sortBy": "publishedAt",
                             "from": from_date,
-                            "pageSize": 20,
+                            "pageSize": 50,
                             "apiKey": NEWS_API_KEY,
                         },
                         timeout=15,
@@ -525,52 +741,57 @@ class IndiaNewsSignalCollector:
                     resp.raise_for_status()
                     articles = resp.json().get("articles", [])
 
+                    relevant = 0
                     for article in articles:
-                        signal = self._classify_article(article, city_code)
+                        signal = self._classify_article(article, city_code, seen_companies)
                         if signal:
                             signals.append(signal)
+                            seen_companies.add(signal["company_name"].lower())
+                            relevant += 1
 
-                    logger.info("NewsAPI %s: %d articles, %d relevant", city_code, len(articles),
-                                sum(1 for a in articles if self._is_relevant(a)))
+                    logger.info("NewsAPI %s: %d articles, %d with extractable company",
+                                city_code, len(articles), relevant)
                 except Exception as e:
                     logger.warning("NewsAPI %s: %s", city_code, e)
 
         return signals
 
-    def _classify_article(self, article: dict, city_code: str) -> dict | None:
-        title = article.get("title", "")
-        description = article.get("description", "")
+    def _classify_article(self, article: dict, city_code: str,
+                          seen: set[str]) -> dict | None:
+        title = (article.get("title") or "").strip()
+        description = (article.get("description") or "").strip()
         text = f"{title} {description}".lower()
 
-        if not self._is_relevant(article):
+        # Reject noise (Bollywood, elections, cricket, listicles, etc.)
+        if self.NOISE_PATTERNS.search(text):
             return None
 
-        # Classify signal type from text
+        # Try to extract a real company name via regex patterns
+        company_name = self._extract_company(title)
+        if not company_name:
+            return None  # Can't identify a specific company — skip
+
+        # Dedup: same company already seen from another city's query
+        if company_name.lower() in seen:
+            return None
+
+        # Classify signal type
         signal_type = "CITY_EXPANSION_PR"
         urgency = 168
         persona = 3
 
-        if any(kw in text for kw in ["raised", "funding", "seed", "series"]):
+        if any(kw in text for kw in ["raised", "raises", "funding", "seed", "series", "secures"]):
             signal_type = "FUNDING"
             urgency = 48
             persona = 1
-        elif any(kw in text for kw in ["hiring", "hired", "new jobs", "recruiting"]):
+        elif any(kw in text for kw in ["hiring", "hired", "hires", "new jobs", "recruiting", "to hire"]):
             signal_type = "HIRING_SURGE"
             urgency = 168
             persona = 2
-        elif any(kw in text for kw in ["return to office", "back to office", "wfh reversal", "hybrid"]):
+        elif any(kw in text for kw in ["return to office", "back to office", "wfh reversal", "hybrid work"]):
             signal_type = "WFH_REVERSAL"
             urgency = 336
             persona = 2
-        elif any(kw in text for kw in ["expanding", "new office", "opening office", "new city"]):
-            signal_type = "CITY_EXPANSION_PR"
-            urgency = 168
-            persona = 3
-
-        # Extract company name (best effort from title)
-        company_name = title.split(" raise")[0].split(" Raise")[0].split(" hire")[0].split(" open")[0].strip()
-        if len(company_name) > 80:
-            company_name = company_name[:80]
 
         return {
             "company_name": company_name,
@@ -586,9 +807,47 @@ class IndiaNewsSignalCollector:
             "detected_at": datetime.now(IST).isoformat(),
         }
 
-    def _is_relevant(self, article: dict) -> bool:
-        text = f"{article.get('title', '')} {article.get('description', '')}".lower()
-        return any(kw in text for kw in self.WORKSPACE_KEYWORDS)
+    # Attribution prefixes to strip: "Ola alumni's X" → "X"
+    _ATTRIBUTION_RE = re.compile(
+        r"^(?:.*?(?:alumni|alumnus|ex-?\w+|former\s+\w+)['\u2019]?s?\s+)",
+        re.IGNORECASE,
+    )
+    # Common non-company prefixes
+    _PREFIX_RE = re.compile(
+        r"^(?:exclusive|breaking|watch|update|report|alert|"
+        r"startup|indian\s+startup|india['\u2019]?s)\s*[:\-–—]\s*",
+        re.IGNORECASE,
+    )
+
+    def _extract_company(self, title: str) -> str | None:
+        """Extract company name from a news headline using regex patterns."""
+        for pattern in self.COMPANY_PATTERNS:
+            m = pattern.match(title)
+            if m:
+                name = m.group("company").strip()
+
+                # Strip "Exclusive: ", "Breaking — " etc.
+                name = self._PREFIX_RE.sub("", name).strip()
+
+                # Strip attribution: "Ola alumni's Manav Robotics" → "Manav Robotics"
+                cleaned = self._ATTRIBUTION_RE.sub("", name).strip()
+                if cleaned and len(cleaned) >= 2:
+                    name = cleaned
+
+                # Strip trailing possessive/punctuation
+                name = re.sub(r"['\u2019]s\s*$", "", name).strip()
+                name = name.rstrip(":-–—,;.")
+
+                # Reject if still too long (likely a sentence, not a name)
+                if len(name) > 50:
+                    return None
+                # Reject if too short or generic
+                if len(name) < 2:
+                    return None
+                if name.lower() in ("the", "a", "an", "this", "india", "startup", "company"):
+                    return None
+                return name
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -653,6 +912,8 @@ class SignalCollectorV2:
 
         # Tier 2: Tracxn + Crunchbase funding
         tracxn_signals = self.tracxn.collect(cities)
+        # Sort Tracxn by confidence desc so highest-quality leads survive any cap
+        tracxn_signals.sort(key=lambda s: s.get("confidence_score") or 0, reverse=True)
         cb_signals = self.crunchbase.collect(cities)
         # Dedup: prefer Tracxn, add unique Crunchbase signals
         tracxn_companies = {s["company_name"].lower() for s in tracxn_signals}
@@ -662,8 +923,11 @@ class SignalCollectorV2:
         # Tier 3: Hiring
         results["hiring"] = self.hiring.collect(cities)
 
-        # Tier 4: News NLP
-        results["news"] = self.news.collect(cities)
+        # Tier 4: News NLP — disabled for now. Headline-regex company extraction
+        # produces too many junk entries ("Curefoods bets on premium..."), and
+        # Hunter/Apollo domain matching on loose names mis-routes enrichment
+        # (e.g. "Plazza" → Swiss plazza.ch). Re-enable after tightening extraction.
+        results["news"] = []
 
         # Tier 5: Property
         results["property"] = self.property.collect(cities)

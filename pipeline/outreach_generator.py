@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime
 
-from config.settings import ANTHROPIC_API_KEY, DRY_RUN
+from config.settings import ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENROUTER_MODEL, DRY_RUN
 from pipeline.utils import IST, upsert_to_supabase
 
 logger = logging.getLogger(__name__)
@@ -37,12 +37,23 @@ class OutreachGenerator:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.client = None
-        if not dry_run and ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if not dry_run and OPENROUTER_API_KEY:
             try:
-                import anthropic
-                self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception as exc:
-                logger.warning("Could not init Anthropic client: %s", exc)
+                logger.warning("Could not init OpenRouter client: %s", exc)
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if not dry_run and ANTHROPIC_API_KEY:
+        #     try:
+        #         import anthropic
+        #         self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        #     except Exception as exc:
+        #         logger.warning("Could not init Anthropic client: %s", exc)
 
     def generate_batch(self, leads: list[dict]) -> list[dict]:
         """Generate outreach for leads. PKM profile is MANDATORY — no profile, no outreach."""
@@ -239,15 +250,26 @@ Lead context:
         if not self.client:
             return ""
         try:
-            msg = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+            # OpenRouter (OpenAI-compatible) — was Anthropic claude-sonnet-4
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=max_tokens,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
-            return msg.content[0].text
+            return resp.choices[0].message.content
+            # REVERT TO ANTHROPIC:
+            # msg = self.client.messages.create(
+            #     model="claude-sonnet-4-20250514",
+            #     max_tokens=max_tokens,
+            #     system=SYSTEM_PROMPT,
+            #     messages=[{"role": "user", "content": user_prompt}],
+            # )
+            # return msg.content[0].text
         except Exception as exc:
-            logger.error("Claude API call failed: %s", exc)
+            logger.error("LLM API call failed: %s", exc)
             return ""
 
     def _build_outreach_record(self, lead, wa1, wa2, email1, email2, li, script):

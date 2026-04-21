@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from config.settings_v2 import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, ANTHROPIC_API_KEY
+from config.settings_v2 import AIRTABLE_API_KEY, AIRTABLE_BASE_ID, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENROUTER_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +83,23 @@ class CompetitorScanner:
         self.dry_run = dry_run
         self.apify_token = os.getenv("APIFY_TOKEN", "")
         self.client = None
-        if ANTHROPIC_API_KEY:
+        # OpenRouter (gpt-oss-120b) — swap back to Anthropic by uncommenting below
+        if OPENROUTER_API_KEY:
             try:
-                from anthropic import Anthropic
-                self.client = Anthropic()
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=OPENROUTER_API_KEY,
+                )
             except Exception:
                 pass
+        # REVERT TO ANTHROPIC: uncomment below, comment out OpenRouter block above
+        # if ANTHROPIC_API_KEY:
+        #     try:
+        #         from anthropic import Anthropic
+        #         self.client = Anthropic()
+        #     except Exception:
+        #         pass
 
     def run_full_scan(self) -> dict:
         """Run weekly competitor scan across all competitors."""
@@ -140,24 +151,23 @@ class CompetitorScanner:
 
             text = content[0].get("text", "")[:3000]
 
-            # Claude extraction
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            # OpenRouter extraction — was Claude haiku
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=400,
-                system="Extract pricing intel from coworking website. Return JSON only.",
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": "Extract pricing intel from coworking website. Return JSON only."},
+                    {"role": "user", "content": (
                         f"Extract from {comp['name']} pricing page:\n{text}\n\n"
                         "Return JSON: {\"hot_desk_min\": number|null, "
                         "\"dedicated_desk_min\": number|null, "
                         "\"private_cabin_min\": number|null, "
                         "\"promotions\": [\"list\"], \"currency\": \"INR\"}"
-                    ),
-                }],
+                    )},
+                ],
             )
 
-            pricing = json.loads(resp.content[0].text)
+            pricing = json.loads(resp.choices[0].message.content)
             pricing["competitor"] = comp_key
             pricing["scraped_at"] = datetime.now(IST).isoformat()
 
@@ -196,22 +206,21 @@ class CompetitorScanner:
             if not titles:
                 return []
 
-            resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=500,
-                system="Analyze competitor blog. Find content gaps. Return JSON only.",
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": "Analyze competitor blog. Find content gaps. Return JSON only."},
+                    {"role": "user", "content": (
                         f"{comp['name']} blog topics:\n" + "\n".join(titles) +
                         "\n\nReturn JSON: {\"gaps\": [\"topic\"], "
                         "\"myhq_content_priorities\": ["
                         "{\"title\": \"str\", \"why\": \"str\", \"keywords\": [\"str\"]}]}"
-                    ),
-                }],
+                    )},
+                ],
             )
 
-            result = json.loads(resp.content[0].text)
+            result = json.loads(resp.choices[0].message.content)
             priorities = result.get("myhq_content_priorities", [])
 
             _store_intel(comp_key, "content_gaps", result)
@@ -254,23 +263,22 @@ class CompetitorScanner:
             if not snippets:
                 return []
 
-            ai_resp = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            ai_resp = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 max_tokens=400,
-                system="Extract customer pain points from reviews. Return JSON only.",
-                messages=[{
-                    "role": "user",
-                    "content": (
+                messages=[
+                    {"role": "system", "content": "Extract customer pain points from reviews. Return JSON only."},
+                    {"role": "user", "content": (
                         f"Reviews about {comp['name']} in {city}:\n"
                         + "\n".join(snippets)
                         + "\n\nReturn JSON: {\"pain_points\": ["
                         "{\"complaint\": \"str\", \"myhq_advantage\": \"str\", "
                         "\"content_idea\": \"str\"}]}"
-                    ),
-                }],
+                    )},
+                ],
             )
 
-            result = json.loads(ai_resp.content[0].text)
+            result = json.loads(ai_resp.choices[0].message.content)
             pain_points = result.get("pain_points", [])
 
             for pp in pain_points:

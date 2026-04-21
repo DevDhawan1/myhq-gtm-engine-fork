@@ -171,9 +171,11 @@ class GTMEngineV2:
             # Normalize fields for v1 modules
             enriched = [_normalize_lead_fields(l) for l in enriched]
 
-            # Filter: only leads with verified contact
-            valid = [l for l in enriched if l.get("email_valid") or l.get("whatsapp_verified")]
-            self.console.print(f"  Enriched: {len(enriched)} | Valid contacts: {len(valid)}")
+            # Count leads with verified contacts (but keep all leads —
+            # leads without contact info are still useful for SDR research)
+            with_contact = [l for l in enriched if l.get("email_valid") or l.get("whatsapp_verified")]
+            valid = enriched
+            self.console.print(f"  Enriched: {len(enriched)} | With contact: {len(with_contact)}")
 
             # Step 3: Persona matching (v1 — proven 3-persona system)
             progress.update(task, description="[yellow]Matching personas…")

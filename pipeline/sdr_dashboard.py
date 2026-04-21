@@ -267,7 +267,7 @@ class SDRDashboard:
         for l in call_list:
             c = {k: v for k, v in l.items() if not k.startswith("_") and k != "persona_details" and k != "score_breakdown" and k != "persona_match_scores"}
             clean.append(c)
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             json.dump(clean, f, indent=2, default=str)
         return filename
 
@@ -304,7 +304,7 @@ class SDRDashboard:
             lines.append("---")
             lines.append("")
 
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         return filename
 
