@@ -41,7 +41,7 @@ def db_cursor():
         conn.close()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"ok": True}
 

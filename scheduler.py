@@ -3,7 +3,8 @@
 
 Cron schedule (IST):
   06:00 daily    — Signal detection (Tracxn, Naukri, MCA, news)
-  06:30 daily    — Enrichment + PKM profiling
+  06:30 daily    — Enrichment + PKM profiling (fires Apollo waterfall)
+  06:45 daily    — Reconcile Apollo async phone webhooks
   07:00 daily    — WhatsApp sends (7-9am is best open rate in India)
   09:00 daily    — Reply classification + HOT alerts
   Mon  07:00     — Competitor intelligence scan (weekly)
@@ -12,18 +13,26 @@ Cron schedule (IST):
 Usage:
   python scheduler.py --job signals
   python scheduler.py --job enrich
+  python scheduler.py --job reconcile-apollo
   python scheduler.py --job whatsapp
   python scheduler.py --job replies
   python scheduler.py --job competitors
   python scheduler.py --job content
 
-Crontab example:
+Crontab example (Linux/Mac — times in UTC; add 5h30m for IST):
   0  0 * * * cd ~/myhq-gtm-engine && python scheduler.py --job signals
   30 0 * * * cd ~/myhq-gtm-engine && python scheduler.py --job enrich
+  45 0 * * * cd ~/myhq-gtm-engine && python scheduler.py --job reconcile-apollo
   0  1 * * * cd ~/myhq-gtm-engine && python scheduler.py --job whatsapp
   30 3 * * * cd ~/myhq-gtm-engine && python scheduler.py --job replies
   0  1 * * 1 cd ~/myhq-gtm-engine && python scheduler.py --job competitors
   0  3 * * 3 cd ~/myhq-gtm-engine && python scheduler.py --job content
+
+Windows Task Scheduler equivalent:
+  Create a Basic Task per job in Task Scheduler → set trigger to daily at
+  target IST time → action: "Start a program" → program:
+  C:\path\to\venv\Scripts\python.exe  arguments: scheduler.py --job <name>
+  start-in: C:\path\to\myhq-gtm-engine
 """
 
 from __future__ import annotations
