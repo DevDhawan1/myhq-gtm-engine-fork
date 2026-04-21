@@ -20,3 +20,6 @@ venv/
 
 # Output
 results/
+
+# Local test / scratch scripts
+test_apollo_*.py
