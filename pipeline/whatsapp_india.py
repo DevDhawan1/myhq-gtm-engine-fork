@@ -51,66 +51,33 @@ ALERT_EMAIL = os.getenv("ALERT_EMAIL", SMTP_USER)
 # Templates must be pre-approved by Meta via WATI dashboard.
 # Approval takes 24-72 hours per template. Submit all 5 on day one.
 
+# Each template's `variables` list defines the ordered mapping of lead data
+# into the Meta-approved body's {{1}}, {{2}}, ... placeholders. The order here
+# MUST match the placeholder order in the template submitted to WATI/Meta.
 WHATSAPP_TEMPLATES: dict[str, dict] = {
     "MOTIVE_INFERENCE": {
         "template_name": "myhq_data_first_v1",
-        "max_words": 80,
-        "example": (
-            "Congrats on the {funding_round}. 23 funded founders used myHQ "
-            "to get office-ready in 48h last quarter — {city} {seats} seats. "
-            "No 11-month lease. {calendar_link}"
-        ),
-        "banned": ["I'd love", "excited to share", "great opportunity", "reach out"],
+        "variables": ["contact_name", "funding_round", "city", "seats", "calendar_link"],
     },
     "OVERLOAD_AVOIDANCE": {
         "template_name": "myhq_ultra_short_v1",
-        "max_words": 60,
-        "example": (
-            "{company} hiring in {city}. myHQ has {seats} desks ready this week. "
-            "48h setup, no lock-in. Worth 10 min? {calendar_link}"
-        ),
-        "banned": ["hope this finds you", "quick call", "at your convenience", "just following up"],
+        "variables": ["contact_name", "company", "city", "seats", "calendar_link"],
     },
     "IDENTITY_THREAT": {
         "template_name": "myhq_amplify_v1",
-        "max_words": 70,
-        "example": (
-            "You built {company} to {headcount} people without a bloated office. "
-            "myHQ gives you the infrastructure to keep moving fast — {seats} seats "
-            "in {city}, ready when you are. {calendar_link}"
-        ),
-        "banned": ["let us help", "you need", "solve your problem", "we can fix"],
+        "variables": ["contact_name", "company", "headcount", "city", "seats", "calendar_link"],
     },
     "SOCIAL_PROOF_SKEPTICISM": {
         "template_name": "myhq_proof_v1",
-        "max_words": 90,
-        "example": (
-            "myHQ numbers for {city}: 94% occupancy, avg 4.2/5 Google rating, "
-            "GST invoice within 24h, 99.9% uptime SLA. {headcount} people, "
-            "{seats} seats. Full terms at myhq.in/enterprise. Worth a look?"
-        ),
-        "banned": ["trusted by", "leading platform", "best in class", "industry-leading"],
+        "variables": ["contact_name", "city", "headcount", "seats"],
     },
     "AUTHORITY_DEFERENCE": {
         "template_name": "myhq_authority_v1",
-        "max_words": 90,
-        "example": (
-            "{contact_name}, your CRE team will want these numbers: "
-            "myHQ managed offices in {city} — {seats} seats, SLA 99.9%, "
-            "GST compliant, RERA registered. Comparable: TCS, Infosys, Wipro "
-            "use managed offices. One-page brief at myhq.in/enterprise."
-        ),
-        "banned": ["hustle", "startup culture", "vibe", "community"],
+        "variables": ["contact_name", "city", "seats"],
     },
     "COMPLEXITY_FEAR": {
         "template_name": "myhq_simple_v1",
-        "max_words": 60,
-        "example": (
-            "3 steps: 1) Pick a location on myhq.in 2) We handle setup "
-            "3) Walk in Monday. {seats} seats in {city}. No deposits. "
-            "No lock-in. One invoice."
-        ),
-        "banned": ["seamless integration", "platform", "onboarding", "configuration"],
+        "variables": ["contact_name", "seats", "city"],
     },
 }
 
@@ -134,19 +101,27 @@ class WhatsAppSender:
             return {"success": False, "error": "pkm_missing", "company": company}
 
         defense = pkm["defense_mode"]
-        messages = lead.get("messages", {})
 
-        # Use pre-generated message if available, otherwise fill template
-        message_text = messages.get("whatsapp", "")
-        if not message_text:
-            message_text = self._fill_template(defense, lead)
+        # Guard: MOTIVE_INFERENCE template opens with "Congrats on the {funding_round}"
+        # which only reads correctly when the triggering signal is actually a funding event.
+        # For any other signal type, fall back to the neutral short template.
+        if defense == "MOTIVE_INFERENCE" and lead.get("signal_type") != "FUNDING":
+            defense = "OVERLOAD_AVOIDANCE"
 
         clean_phone = _clean_indian_number(phone)
         if not clean_phone:
             return {"success": False, "error": "invalid_phone", "company": company}
 
+        template_cfg = WHATSAPP_TEMPLATES.get(defense, WHATSAPP_TEMPLATES["OVERLOAD_AVOIDANCE"])
+        template_name = template_cfg["template_name"]
+        vars_dict = self._build_vars(lead)
+        parameters = [
+            {"name": str(i + 1), "value": str(vars_dict.get(var, ""))}
+            for i, var in enumerate(template_cfg["variables"])
+        ]
+
         if self.dry_run or not WATI_API_TOKEN:
-            return self._mock_send(clean_phone, company, defense, message_text)
+            return self._mock_send(clean_phone, company, defense, template_name, parameters)
 
         # TRAI DND check
         if _is_on_dnd(clean_phone):
@@ -154,7 +129,6 @@ class WhatsAppSender:
             return {"success": False, "error": "dnd_registered", "company": company}
 
         try:
-            template_name = WHATSAPP_TEMPLATES.get(defense, {}).get("template_name", "myhq_ultra_short_v1")
             number = clean_phone.replace("+", "")
             resp = requests.post(
                 f"{WATI_BASE_URL}/api/v1/sendTemplateMessage?whatsappNumber={number}",
@@ -165,7 +139,7 @@ class WhatsAppSender:
                 json={
                     "template_name": template_name,
                     "broadcast_name": "myhq_gtm",
-                    "parameters": [{"name": "1", "value": message_text}],
+                    "parameters": parameters,
                 },
                 timeout=10,
             )
@@ -176,7 +150,7 @@ class WhatsAppSender:
             send_result = {
                 "success": success,
                 "message_id": result.get("messageId"),
-                "template_used": WHATSAPP_TEMPLATES.get(defense, {}).get("template_name"),
+                "template_used": template_name,
                 "defense_mode": defense,
                 "phone": clean_phone,
                 "company": company,
@@ -213,10 +187,11 @@ class WhatsAppSender:
                      sum(1 for r in results if not r.get("success")))
         return results
 
-    def _fill_template(self, defense: str, lead: dict) -> str:
-        template = WHATSAPP_TEMPLATES.get(defense, WHATSAPP_TEMPLATES["OVERLOAD_AVOIDANCE"])
+    def _build_vars(self, lead: dict) -> dict:
+        """Superset of every variable any template might need. Each template's
+        `variables` list projects this into the ordered WATI parameters array."""
         emp = lead.get("employee_count") or 10
-        vars_dict = {
+        return {
             "company": lead.get("company_name", "your company"),
             "city": lead.get("city", "Bengaluru"),
             "seats": max(5, emp // 3),
@@ -225,32 +200,19 @@ class WhatsAppSender:
             "contact_name": (lead.get("name") or "").split()[0] or "there",
             "calendar_link": "myhq.in/book",
             "job_count": lead.get("job_count", ""),
-            "quarter": (datetime.now().month - 1) // 3 + 1,
         }
-        try:
-            msg = template["example"].format(**vars_dict)
-        except KeyError:
-            msg = template["example"]
 
-        # Enforce word cap
-        words = msg.split()
-        if len(words) > template["max_words"]:
-            msg = " ".join(words[: template["max_words"]])
-
-        # Strip banned phrases
-        for banned in template.get("banned", []):
-            msg = msg.replace(banned, "").replace(banned.capitalize(), "")
-
-        return msg.strip()
-
-    def _mock_send(self, phone: str, company: str, defense: str, message: str) -> dict:
-        logger.info("[DRY RUN WA] %s → %s (%s): %s…", company, phone, defense, message[:60])
+    def _mock_send(self, phone: str, company: str, defense: str,
+                   template_name: str, parameters: list) -> dict:
+        logger.info("[DRY RUN WA] %s → %s (%s, %s): %s",
+                    company, phone, defense, template_name, parameters)
         return {
             "success": True,
             "dry_run": True,
             "company": company,
             "defense_mode": defense,
-            "template_used": WHATSAPP_TEMPLATES.get(defense, {}).get("template_name"),
+            "template_used": template_name,
+            "parameters": parameters,
         }
 
     def _queue_to_airtable(self, lead: dict, status: str, send_result: dict | None = None):
