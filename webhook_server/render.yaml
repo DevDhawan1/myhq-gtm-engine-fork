@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: apollo-webhook
+    name: myhq-webhook-receiver
     runtime: python
     plan: free
     rootDir: webhook_server
@@ -11,4 +11,6 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: APOLLO_WEBHOOK_SECRET
+        sync: false
+      - key: SENDGRID_WEBHOOK_SECRET
         sync: false
